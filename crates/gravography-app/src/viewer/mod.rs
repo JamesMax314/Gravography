@@ -6,6 +6,7 @@
 //! tone-maps the accumulation buffer onto the window and egui draws on top. Exposure and the tone map are applied
 //! when presenting, so changing them does not restart accumulation.
 
+pub mod capture;
 pub mod flight;
 pub mod input;
 pub mod screenshot;
@@ -26,13 +27,13 @@ use gravography_render::tonemap::log_average_luminance;
 use gravography_render::{FrameParams, Scene, Sky, write_image};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
-use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
+use winit::event::{DeviceEvent, DeviceId, ElementState, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::PhysicalKey;
-use winit::window::{Window, WindowId};
+use winit::window::{CursorGrabMode, Window, WindowId};
 
 use self::flight::{Camera, Flight, Hud, check_preset};
-use self::input::{KeyAction, ThrustKeys, degrees_per_pixel, drag_to_look, key_action};
+use self::input::{KeyAction, LookButton, MouseLook, ThrustKeys, degrees_per_pixel, key_action};
 use self::screenshot::screenshot_paths;
 use self::state::{Accumulation, ViewSettings, internal_size};
 use self::ui::{FlightPanel, Status, hud_lines, hud_window, settings_panel};
@@ -82,8 +83,10 @@ enum SmokeStage {
     Converge2,
     /// Falling until inside the horizon, then pause.
     Falling,
-    /// Wait for convergence inside the horizon, then screenshot and exit.
+    /// Wait for convergence inside the horizon, then screenshot.
     Converge3,
+    /// One more redraw for the last window capture, then exit.
+    Finish,
     /// Finished.
     Done,
 }
@@ -127,16 +130,16 @@ struct Gfx {
     editor: ObserverSpec,
     /// Held thrust keys.
     keys: ThrustKeys,
-    /// Left mouse button held over the 3D view (mouse look).
-    dragging: bool,
-    /// Last cursor position (physical pixels).
-    cursor: Option<(f64, f64)>,
+    /// Mouse look (drag or captured cursor).
+    mouse: MouseLook,
     /// Camera of the accumulated image.
     rendered: Option<Camera>,
     /// When exposure and ray statistics were last read back.
     last_meter: Option<Instant>,
     /// Wall-clock time of the last flight update.
     last_update: Instant,
+    /// Capture the next presented window frame (panel and HUD included) to this PNG.
+    capture_to: Option<PathBuf>,
 }
 
 impl ApplicationHandler for App {
@@ -185,29 +188,25 @@ impl ApplicationHandler for App {
                     gfx.window.request_redraw();
                 }
             }
-            WindowEvent::MouseInput {
-                state,
-                button: MouseButton::Left,
-                ..
-            } => {
-                // Start a drag only over the 3D view; always end it.
-                gfx.dragging = state == ElementState::Pressed && !response.consumed;
+            WindowEvent::MouseInput { state, button, .. } => {
+                let button = match button {
+                    MouseButton::Left => Some(LookButton::Left),
+                    MouseButton::Right => Some(LookButton::Right),
+                    _ => None,
+                };
+                if let Some(b) = button {
+                    gfx.mouse_button(b, state == ElementState::Pressed, response.consumed);
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                let now = (position.x, position.y);
-                if let (true, Some(last)) = (gfx.dragging, gfx.cursor) {
-                    let Projection::Rectilinear { fov_deg } = self.opts.scene.camera.projection;
-                    let deg = degrees_per_pixel(fov_deg, gfx.config.height);
-                    let (dy, dp) = drag_to_look(now.0 - last.0, now.1 - last.1, deg);
-                    gfx.flight.look_by(dy, dp);
-                    gfx.window.request_redraw();
-                }
-                gfx.cursor = Some(now);
+                gfx.cursor_moved((position.x, position.y), &self.opts);
             }
             WindowEvent::Focused(false) => {
                 // Key releases are lost while unfocused: drop held keys so thrust does not stick.
                 gfx.keys.clear();
-                gfx.dragging = false;
+                if gfx.mouse.release() {
+                    gfx.set_capture(false);
+                }
             }
             WindowEvent::RedrawRequested => {
                 if let Err(e) = gfx.redraw(&self.opts) {
@@ -219,6 +218,17 @@ impl ApplicationHandler for App {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn device_event(&mut self, _event_loop: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
+        // Raw motion drives the captured mouse look (the cursor itself is locked and hidden).
+        if let (Some(gfx), DeviceEvent::MouseMotion { delta }) = (self.gfx.as_mut(), event) {
+            let deg = gfx.degrees_per_pixel(&self.opts);
+            if let Some((dy, dp)) = gfx.mouse.raw_motion(delta, deg) {
+                gfx.flight.look_by(dy, dp);
+                gfx.window.request_redraw();
+            }
         }
     }
 }
@@ -263,22 +273,48 @@ impl App {
                 }
                 Ok(())
             }
-            SmokeStage::Converge2 if gfx.accum.converged() => gfx.smoke_screenshot(&self.opts).and_then(|_| {
-                // Spin up while hovering (keeps the state), then fall in from r = 8 at 4 M/s.
-                if let Some(m) = gfx.flight.set_spin(0.5) {
-                    anyhow::bail!("spin change while hovering at r = 30 reset the observer: {m}");
-                }
-                let infall = ObserverSpec {
-                    preset: PresetKind::RadialInfall,
-                    r: 8.0,
-                    ..flight::safe_preset()
-                };
-                gfx.flight.apply_preset(&infall).map_err(|e| anyhow!(e))?;
-                gfx.flight.settings.time_warp = 4.0;
-                gfx.flight.settings.paused = false;
-                self.smoke = SmokeStage::Falling;
-                Ok(())
-            }),
+            SmokeStage::Converge2 if gfx.accum.converged() => {
+                gfx.smoke_screenshot(&self.opts).and_then(|_| {
+                    // Drag the view through the viewer's own mouse handlers (OS events cannot be injected here): the
+                    // look must turn left and up ("grab the sky": drag right and down).
+                    let (cx, cy) = (
+                        f64::from(gfx.config.width) * 0.6,
+                        f64::from(gfx.config.height) * 0.5,
+                    );
+                    gfx.cursor_moved((cx, cy), &self.opts);
+                    gfx.mouse_button(LookButton::Left, true, false);
+                    anyhow::ensure!(
+                        gfx.mouse.dragging(),
+                        "a left press over the 3D view did not start a drag"
+                    );
+                    gfx.cursor_moved((cx + 200.0, cy + 100.0), &self.opts);
+                    gfx.mouse_button(LookButton::Left, false, false);
+                    let look = gfx.flight.look;
+                    anyhow::ensure!(
+                        look.yaw_deg > 1.0 && look.pitch_deg > 0.5,
+                        "drag did not turn the view: {look:?}"
+                    );
+                    println!(
+                        "smoke test: drag turned the view by yaw {:.2}°, pitch {:.2}°",
+                        look.yaw_deg, look.pitch_deg
+                    );
+                    gfx.flight.reset_look();
+                    // Spin up while hovering (keeps the state), then fall in from r = 8 at 4 M/s.
+                    if let Some(m) = gfx.flight.set_spin(0.5) {
+                        anyhow::bail!("spin change while hovering at r = 30 reset the observer: {m}");
+                    }
+                    let infall = ObserverSpec {
+                        preset: PresetKind::RadialInfall,
+                        r: 8.0,
+                        ..flight::safe_preset()
+                    };
+                    gfx.flight.apply_preset(&infall).map_err(|e| anyhow!(e))?;
+                    gfx.flight.settings.time_warp = 4.0;
+                    gfx.flight.settings.paused = false;
+                    self.smoke = SmokeStage::Falling;
+                    Ok(())
+                })
+            }
             SmokeStage::Falling => {
                 let hud = Hud::new(&gfx.flight, &gfx.keys);
                 if gfx.flight.settings.paused {
@@ -298,12 +334,16 @@ impl App {
                 }
             }
             SmokeStage::Converge3 if gfx.accum.converged() => gfx.smoke_screenshot(&self.opts).map(|_| {
+                self.smoke = SmokeStage::Finish;
+            }),
+            SmokeStage::Finish if gfx.capture_to.is_none() => {
                 println!(
                     "smoke test passed: rendered, resized, flew through the horizon and wrote screenshots at each stage"
                 );
                 self.smoke = SmokeStage::Done;
                 event_loop.exit();
-            }),
+                Ok(())
+            }
             _ => Ok(()),
         };
         if let Err(e) = result {
@@ -333,8 +373,10 @@ impl Gfx {
             .ok()
             .or_else(|| caps.formats.first().copied())
             .ok_or_else(|| anyhow!("the surface supports no formats"))?;
+        // COPY_SRC (where supported) lets the smoke test capture the composed window frame.
+        let copy_src = caps.usages & wgpu::TextureUsages::COPY_SRC;
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | copy_src,
             format,
             color_space: wgpu::SurfaceColorSpace::Auto,
             width: size.width.max(1),
@@ -399,11 +441,11 @@ impl Gfx {
             editor: *flight.preset(),
             flight,
             keys: ThrustKeys::default(),
-            dragging: false,
-            cursor: None,
+            mouse: MouseLook::default(),
             rendered: None,
             last_meter: None,
             last_update: Instant::now(),
+            capture_to: None,
             ctx,
         })
     }
@@ -451,10 +493,60 @@ impl Gfx {
             KeyAction::ThrustWeaker => s.thrust *= 0.5,
             KeyAction::ThrustStronger => s.thrust *= 2.0,
             KeyAction::Screenshot => self.screenshot_requested = true,
-            KeyAction::Quit => return true,
+            // Esc first releases a captured cursor; otherwise it quits.
+            KeyAction::Quit => {
+                if !self.mouse.release() {
+                    return true;
+                }
+                self.set_capture(false);
+            }
         }
         self.flight.settings = self.flight.settings.clamped();
         false
+    }
+
+    /// Mouse-look sensitivity for the current window (degrees per physical pixel at the image centre).
+    fn degrees_per_pixel(&self, opts: &ViewerOptions) -> f64 {
+        let Projection::Rectilinear { fov_deg } = opts.scene.camera.projection;
+        degrees_per_pixel(fov_deg, self.config.height)
+    }
+
+    /// A mouse button press or release (`consumed`: egui wants it).
+    fn mouse_button(&mut self, button: LookButton, pressed: bool, consumed: bool) {
+        if let Some(captured) = self.mouse.button(button, pressed, consumed) {
+            self.set_capture(captured);
+        }
+    }
+
+    /// Cursor moved: turns the view while dragging.
+    fn cursor_moved(&mut self, pos: (f64, f64), opts: &ViewerOptions) {
+        let deg = self.degrees_per_pixel(opts);
+        if let Some((dy, dp)) = self.mouse.cursor_moved(pos, deg) {
+            self.flight.look_by(dy, dp);
+            self.window.request_redraw();
+        }
+    }
+
+    /// Locks and hides the cursor for captured mouse look, or releases it.
+    fn set_capture(&mut self, on: bool) {
+        let grab = if on {
+            self.window
+                .set_cursor_grab(CursorGrabMode::Locked)
+                .or_else(|_| self.window.set_cursor_grab(CursorGrabMode::Confined))
+        } else {
+            self.window.set_cursor_grab(CursorGrabMode::None)
+        };
+        self.window.set_cursor_visible(!on);
+        self.status.message = match (on, grab) {
+            (true, Ok(())) => {
+                "mouse look captured: move the mouse to look; right-click or Esc releases".into()
+            }
+            (true, Err(e)) => format!(
+                "mouse look on, but the cursor could not be locked ({e}); right-click or Esc releases"
+            ),
+            (false, _) => "mouse look released".into(),
+        };
+        self.window.request_redraw();
     }
 
     /// Restarts accumulation (reallocating the target if the internal size changed). `hard` (settings, size)
@@ -533,6 +625,7 @@ impl Gfx {
         let raw = self.egui_state.take_egui_input(&self.window);
         let mut settings = self.settings;
         let mut actions = ui::Actions::default();
+        self.status.mouse_captured = self.mouse.captured();
         let status = self.status.clone();
         let mut panel = FlightPanel {
             settings: self.flight.settings,
@@ -611,6 +704,14 @@ impl Gfx {
             }
         }
 
+        // Upload egui texture changes before anything can skip the frame: egui sends each delta (including the
+        // font atlas on the first frame) only once, and a lost atlas makes every egui shape invisible.
+        for (id, deltas) in &out.textures_delta.set {
+            for delta in deltas {
+                self.egui_renderer
+                    .update_texture(&self.ctx.device, &self.ctx.queue, *id, delta);
+            }
+        }
         let surface_texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
@@ -629,12 +730,6 @@ impl Gfx {
             .create_view(&wgpu::TextureViewDescriptor::default());
 
         let paint_jobs = self.egui_ctx.tessellate(out.shapes, out.pixels_per_point);
-        for (id, deltas) in &out.textures_delta.set {
-            for delta in deltas {
-                self.egui_renderer
-                    .update_texture(&self.ctx.device, &self.ctx.queue, *id, delta);
-            }
-        }
         let screen = egui_wgpu::ScreenDescriptor {
             size_in_pixels: [self.config.width, self.config.height],
             pixels_per_point: out.pixels_per_point,
@@ -683,6 +778,10 @@ impl Gfx {
         self.ctx
             .queue
             .submit(egui_cmds.into_iter().chain([encoder.finish()]));
+        if let Some(path) = self.capture_to.take() {
+            capture::capture_texture(&self.ctx, &surface_texture.texture, &path)?;
+            println!("window capture: {}", path.display());
+        }
         self.window.pre_present_notify();
         self.ctx.queue.present(surface_texture);
         for id in &out.textures_delta.free {
@@ -741,6 +840,13 @@ impl Gfx {
     /// Screenshot for the smoke test, checking that both files exist and the PNG has the window's size.
     fn smoke_screenshot(&mut self, opts: &ViewerOptions) -> Result<()> {
         let (png, exr) = self.screenshot(opts)?;
+        if self.config.usage.contains(wgpu::TextureUsages::COPY_SRC) {
+            let name = png
+                .file_name()
+                .map(|n| format!("window-{}", n.to_string_lossy()))
+                .unwrap_or_else(|| "window.png".into());
+            self.capture_to = Some(png.with_file_name(name));
+        }
         let hud = Hud::new(&self.flight, &self.keys);
         for line in hud_lines(
             &hud,
