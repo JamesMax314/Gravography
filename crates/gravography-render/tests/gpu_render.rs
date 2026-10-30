@@ -454,7 +454,7 @@ fn gpu_timer_measures_a_sample() {
     let path = &scene_files()[2];
     let renderer = GpuRenderer::new(&ctx);
     let params = TraceParams::gpu_default();
-    let mut timer = GpuTimer::new();
+    let mut timer = GpuTimer::new(&ctx);
     let mut time = |w: u32, h: u32| {
         let (frame, sky) = test_scene(path, w, h, 1);
         let gpu_sky = GpuSky::upload(&ctx, &sky).expect("upload");

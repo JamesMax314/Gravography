@@ -4,16 +4,23 @@ Real-time interactive viewer that ray traces null geodesics in Schwarzschild and
 gravitationally lensed, aberrated and Doppler/gravitationally shifted sky seen by an observer near a black hole.
 Written in Rust with `wgpu`; macOS (Apple Silicon) is the primary platform.
 
-**Status:** early development. The CPU physics (geodesics, observers), the sky model (colour science, star
-field, cube-map baking) and a CPU f64 reference renderer with a headless `render` command are implemented and
-tested. The GPU backend renders the same images as the CPU reference (PRD tests 15 and 16), with FR-R6 debug
-views. The interactive viewer runs on macOS at 60+ fps at 1080p:
-- free flight with thrust, mouse look, presets, time warp, a HUD, a live spin slider and effect toggles;
-- dynamic resolution while moving;
-- progressive refinement to full resolution when still.
+**Status:** v1. What it does:
 
-Bookmarks, camera paths and the remaining polish are WP-13. See `docs/PRD.md` for the specification and
-`docs/progress_report.md` for progress.
+- **Physics.** Light rays are traced in f64 on the CPU (the reference) and in f32 on the GPU, which matches the
+  reference within the PRD's parity tests. The observer is simulated physically: free fall, thrust, a
+  Fermi–Walker-transported camera, and horizon crossing.
+- **Sky.** A procedural star field in which every star is a blackbody, so colour and brightness follow the exact
+  frequency shift. False-colour bands (near IR, near UV, soft X-ray) and an approximate texture-sky mode are
+  available.
+- **Viewer** (macOS, 60+ fps at 1080p):
+  - free flight with mouse look, presets, time warp, a HUD, a live spin slider and effect toggles;
+  - rectilinear and 360° equirectangular projections;
+  - bookmarks and recorded camera paths;
+  - dynamic resolution while moving, progressive refinement when still.
+- **Headless renders** and a benchmark from the command line.
+
+See `docs/PRD.md` for the specification, `docs/physics.md` for derivations and validation, and
+`docs/progress_report.md` for the development log.
 
 ## Building
 
@@ -41,7 +48,11 @@ Requires Rust 1.99 or newer (edition 2024); the pinned version is in `rust-toolc
 ```bash
 cargo run --release -p gravography-app                                   # default scene (static observer, r = 30 M)
 cargo run --release -p gravography-app -- --scene scenes/kerr_edge_on.toml
+cargo run --release -p gravography-app -- --bookmark bookmarks/my-view.ron     # resume a saved view
 ```
+
+Viewer options: `--scene <file.toml>`, `--bookmark <file.ron>`, `--screenshot-dir` (default `screenshots/`),
+`--bookmark-dir` (default `bookmarks/`), `--path-dir` (default `paths/`), `--no-cache` and `--smoke-test`.
 
 The observer starts at the scene's `[observer]` (preset, boost, look) and is simulated in real time: each frame
 advances its proper time by the frame time × the **time warp** (in `M` per second), integrating its worldline and
@@ -68,11 +79,23 @@ The left panel has these sections:
   Impossible presets are disabled with an explanation, for example hovering inside the ergosphere or an orbit
   below the photon orbit. Orbits below the ISCO get a warning.
 - **Spacetime:** the spin slider, usable in flight. It keeps the position and velocity.
+- **Band:** human vision, or a false-colour composite (near infrared, near ultraviolet, soft X-ray). See `band`
+  under "Scene files".
 - **Effects:** lensing, frequency shift and beaming, each switchable.
 - **Render:**
+  - projection: rectilinear with a 10–150° vertical field of view, or equirectangular 360°;
   - sample target and still scale (the internal resolution when the camera is at rest, default 1.0);
   - dynamic resolution while moving, with its target frame rate (default 60 fps);
   - auto/manual exposure, tone map and screenshot.
+- **Bookmarks & camera paths:**
+  - **Save bookmark** writes `bookmarks/<name>.ron` with the complete state: the observer's event, frame, proper
+    time and motion; the look; the flight and render settings; the spin; the sky. **load …** restores it exactly.
+  - **Record path** samples the observer every chosen interval of proper time. The integration stops exactly at
+    each mark. **Stop & save path** writes `paths/<name>.ron`.
+  - **play …** replays a path at a chosen rate (proper time per second), optionally looping. Paths are the basis
+    for offline video, planned for v2.
+
+  Both are plain RON text files.
 
 **Performance.** While the camera moves, each frame is a fresh 1-sample image. Its internal resolution is chosen
 from the measured GPU time so that the target frame rate holds, but never below 960×540 pixels. When the camera
@@ -98,10 +121,25 @@ Thrust keys switch a hovering or ZAMO observer to free flight. Crossing the hori
 stops near the singularity (Schwarzschild, `r < 0.05 M`) or the inner horizon (Kerr), or beyond `r = 200 M`. It
 then resets to the last preset, paused, with a message.
 
-`--smoke-test` runs a scripted check for automated verification. It renders, takes a screenshot, resizes the
-window, renders and takes a screenshot again. It then sets `a = 0.5`, falls from `r = 8` through the horizon,
-takes a screenshot inside and exits. It also drags the view through the viewer's mouse handlers, and after each
-screenshot it saves a capture of the composed window, panel and HUD included (`window-*.png`).
+`--smoke-test` runs a scripted check for automated verification:
+
+1. it renders, takes a screenshot, resizes the window, renders and takes a screenshot again;
+2. it drags the view through the viewer's mouse handlers;
+3. it sets `a = 0.5` and falls from `r = 8` through the horizon while recording a camera path, then takes a
+   screenshot inside;
+4. it replays the recorded path and round-trips a bookmark (the camera must be restored exactly).
+
+After each screenshot it saves a capture of the composed window, panel and HUD included (`window-*.png`). Its
+files stay under the screenshot directory.
+
+**Texture sky** (approximate, `docs/PRD.md` §6.5). Set `texture = "path/to/sky.exr"` (or `.hdr`) in `[sky]`
+to use an equirectangular linear-radiance image instead of the star field. The image centre is `+x` and the top
+is `+z`.
+
+Real images have no spectra, so each pixel is shown as the blackbody whose colour is nearest to the pixel's
+chromaticity, at the pixel's luminance. Shifted light then changes hue along the blackbody colours, and its
+brightness scales as `g⁴`. Colours far from that locus (greens, purples) are approximated by the nearest blackbody
+colour, and the panel says so. Pixel values are relative, so use auto exposure.
 
 ## Headless rendering
 
@@ -134,9 +172,15 @@ cargo run --release -p gravography-app -- bench --width 2560 --height 1440 --sca
 `--escape-factor`, `--escape-min`, `--horizon-eps`, `--capture-fraction`, `--blowup`, `--max-steps` and `--tile`.
 `--steps-map <dir>` writes the step-count heat maps.
 
-Example scenes in `scenes/`: `schwarzschild_far.toml` (static observer at 50 M), `kerr_edge_on.toml` (`a = 0.99`
-seen edge-on), `inside_horizon.toml` (free fall at r = 1.2 M inside a Schwarzschild horizon) and
-`fast_observer.toml` (moving at 0.9 c past a Schwarzschild hole at 10 M).
+Example scenes in `scenes/` (each file's header describes what to expect):
+
+- `schwarzschild_far.toml`: a static observer at 50 M.
+- `kerr_edge_on.toml`: `a = 0.99` seen edge-on.
+- `inside_horizon.toml`: free fall at r = 1.2 M inside a Schwarzschild horizon.
+- `fast_observer.toml`: moving at 0.9 c past a Schwarzschild hole at 10 M.
+- `kerr_panorama.toml`: a 360° equirectangular view at r = 8 M around `a = 0.9`.
+- `fast_observer_infrared.toml`: the fast observer as a near-infrared false-colour panorama, with hue following
+  the Doppler shift.
 
 ## Scene files
 

@@ -485,6 +485,23 @@ Code: `crates/gravography-sky/src/`.
 - **XYZ → linear sRGB** (`colour.rs`): derived from the sRGB primaries and D65 `(0.3127, 0.3290)` by the standard
   construction (RGB→XYZ columns = primaries scaled so `(1,1,1)` ↦ white), then inverted. It agrees with the IEC
   61966-2-1 4-decimal matrix to < 5e-4. The sRGB transfer function is IEC 61966-2-1.
+- **False-colour bands** (WP-13, §6.1). A `Band` is three channel responses plus a display matrix `D` (channels
+  → linear sRGB) and luminance weights. The composites `near_infrared` (J, H, K), `near_ultraviolet` (200–260,
+  260–320, 320–380 nm) and `soft_xray` (2–8, 1–2, 0.3–1 keV) use top-hat windows from short to long wavelength,
+  shown as blue, green and red:
+  - `D` is diagonal in (long → R, medium → G, short → B), with `D_cc = 1/c_c(T_ref)`, so a blackbody at the band's
+    reference temperature (Wien peak in the band: `T_ref = b/λ_peak`, `b = 2.897771955e-3 m K`) is
+    `rgb = (1, 1, 1)`;
+  - hotter, or blueshifted, light gets bluer, because the Wien peak moves to shorter wavelengths (tested);
+  - luminance weights: `LUMA · D`, so the manual-exposure reference is luminance 1 at `T_ref`;
+  - for human vision the weights are `(0, 1, 0)`, so the reference stays exactly `Y` of 5772 K, unchanged since
+    WP-06.
+
+  The frequency shift needs nothing new: a blackbody stays a blackbody at `gT`, so the same `w · c(gT)` lookup
+  applies in any band. In X-rays, ordinary stars give `S ≈ e^{−10⁵}`, which underflows; `ln S` is clamped to
+  −1000 in the table so interpolation stays finite (tested). The star field is band-independent: the catalogue's
+  visible flux defines each star's `(w, T)`, and the band only changes the table and `D`. Test 16 includes
+  `scenes/fast_observer_infrared.toml`: flux within 0.8% of the CPU reference.
 
 ### Blackbody LUT
 
@@ -516,6 +533,30 @@ is bit-stable across dependency updates (NF-3); the reference vector is tested.
 
 **Diffuse band** (`diffuse.rs`): `w(d) = A e^{−|b|/h} (1 − k + k·fbm(f d))`, with 5-octave value noise hashed with
 `mix64`, its own temperature (4500 K), and `A = 5e-3` chosen by eye (`examples/sky_preview.rs`).
+
+### Texture sky (approximate)
+
+`texture.rs` (WP-13, §6.5). An equirectangular linear-sRGB image (EXR/HDR) is converted into the same `(w, w·T)`
+cube map as the star field:
+
+1. per cube texel, the image is sampled bilinearly in the texel's direction;
+2. the colour is converted to XYZ and chromaticity `(x, y)`;
+3. `T` is the nearest point of the Planckian locus (256 samples, log-spaced over 1000–40 000 K, 1.5% apart);
+4. `w = Y / Y_LUT(T)`.
+
+The renderer then shows `w B(gT)`, which gives exactly the PRD's two requirements: the bolometric intensity scales
+as `g⁴` (since `∫ B(gT) ∝ g⁴T⁴`), and the hue shifts along the Planckian locus.
+
+Limitations, stated in the UI:
+- off-locus colours (greens, purples) collapse to the nearest blackbody colour;
+- spectral detail (emission lines) is lost;
+- pixel values are relative.
+
+Tests:
+- blackbody colours fit back to their `T` within 1.5%, and to their luminance within 1e-3;
+- image orientation: centre `+x`, `u = ¼` is `+y`, top row `+z`;
+- a uniform 4000 K texture seen by a static observer at r = 10 renders at `Y(gT)/Y(T)` times its luminance, with
+  `g = (1 − 2/r)^{−1/2}`, within 6% (the fit's temperature resolution dominates).
 
 ### Sky cube map
 
@@ -552,6 +593,13 @@ the unit-distance image plane, continuous pixel coordinate `(x, y)` (`y` down):
 `n ∝ (1, −(2x/W − 1) t W/H, (1 − 2y/H) t)`. Pixel pitch on the plane is `Δ = 2t/H`, so a pixel subtends
 `dΩ = Δ² cos³θ` with `cos θ = n_f` (tested: the sum over pixels equals the pyramid solid angle
 `4 asin(sin α sin β)`).
+
+**Equirectangular** (WP-13, FR-R2): longitude `λ = −π (2x/W − 1)` (positive to the left, `+π` at the left
+edge), latitude `φ = π (½ − y/H)`, direction `n = (cos φ cos λ, cos φ sin λ, sin φ)`, and
+`dΩ = cos φ (2π/W)(π/H)`. Tested: the six axis directions land at the expected pixels, and the per-pixel solid
+angles sum to `4π` (relative error 3e-6 at H = 300). The GPU uses the same formulas (`camera.wgsl`). Footprints
+come from neighbouring rays, so shading needs no change. Test 16 includes `scenes/kerr_panorama.toml`: flux
+within 0.2% of the CPU reference. Mouse-look sensitivity is `180°/H` per pixel.
 
 ### Boosted observers
 

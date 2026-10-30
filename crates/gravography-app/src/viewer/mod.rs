@@ -544,7 +544,7 @@ impl Gfx {
             last_update: Instant::now(),
             capture_to: None,
             dynres: DynamicResolution::new(min_moving_scale(window_size).max(0.5)),
-            timer: GpuTimer::new(),
+            timer: GpuTimer::new(&ctx),
             stats: GpuStats::new(&ctx),
             last_move: None,
             layout: window_size,
