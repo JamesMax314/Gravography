@@ -135,6 +135,79 @@ pub fn drag_to_look(dx: f64, dy: f64, deg_per_px: f64) -> (f64, f64) {
     (dx * deg_per_px, dy * deg_per_px)
 }
 
+/// Mouse buttons that matter for looking.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LookButton {
+    /// Left: drag to look ("grab the sky").
+    Left,
+    /// Right: toggle captured mouse look.
+    Right,
+}
+
+/// Mouse-look state (`docs/PRD.md` FR-O1 "drag or captured cursor"; both are supported):
+/// - **drag:** hold the left button over the 3D view and move; the sky follows the cursor;
+/// - **captured:** a right click over the 3D view hides and locks the cursor, and mouse motion turns the view like
+///   a first-person game (mouse right turns right). Another right click, Esc or focus loss releases it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MouseLook {
+    dragging: bool,
+    last: Option<(f64, f64)>,
+    captured: bool,
+}
+
+impl MouseLook {
+    /// Whether the cursor is captured.
+    pub fn captured(&self) -> bool {
+        self.captured
+    }
+
+    /// Whether a drag is in progress.
+    pub fn dragging(&self) -> bool {
+        self.dragging
+    }
+
+    /// A button press or release. `consumed`: egui wants this click (the pointer is over the panel or the HUD).
+    /// Returns `Some(captured)` when the capture state changed (the viewer then grabs or releases the cursor).
+    pub fn button(&mut self, button: LookButton, pressed: bool, consumed: bool) -> Option<bool> {
+        match button {
+            LookButton::Left => {
+                // Start a drag only over the 3D view; always end it.
+                self.dragging = pressed && !consumed && !self.captured;
+                None
+            }
+            LookButton::Right if pressed && (!consumed || self.captured) => {
+                self.dragging = false;
+                self.captured = !self.captured;
+                Some(self.captured)
+            }
+            LookButton::Right => None,
+        }
+    }
+
+    /// Cursor moved to `pos` (physical pixels). Returns the look change `(Δyaw, Δpitch)` in degrees while dragging.
+    pub fn cursor_moved(&mut self, pos: (f64, f64), deg_per_px: f64) -> Option<(f64, f64)> {
+        let last = self.last.replace(pos);
+        match (self.dragging, last) {
+            (true, Some(l)) => Some(drag_to_look(pos.0 - l.0, pos.1 - l.1, deg_per_px)),
+            _ => None,
+        }
+    }
+
+    /// Raw mouse motion `(dx, dy)` (device units, about a pixel each). Returns the look change while captured:
+    /// first-person convention, the opposite sign of a drag (mouse right turns right, i.e. negative yaw; mouse
+    /// down looks down).
+    pub fn raw_motion(&self, delta: (f64, f64), deg_per_px: f64) -> Option<(f64, f64)> {
+        self.captured
+            .then(|| drag_to_look(-delta.0, -delta.1, deg_per_px))
+    }
+
+    /// Releases drag and capture (Esc, focus loss). Returns `true` if the cursor was captured.
+    pub fn release(&mut self) -> bool {
+        self.dragging = false;
+        std::mem::take(&mut self.captured)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,5 +271,43 @@ mod tests {
         );
         assert!(degrees_per_pixel(60.0, 0).is_finite());
         assert_eq!(drag_to_look(10.0, -4.0, 0.5), (5.0, -2.0));
+    }
+
+    #[test]
+    fn drag_looks_only_from_the_3d_view() {
+        let mut m = MouseLook::default();
+        // Moving without a button does nothing (but records the position).
+        assert_eq!(m.cursor_moved((100.0, 100.0), 0.5), None);
+        // A press on the panel (consumed) does not start a drag.
+        m.button(LookButton::Left, true, true);
+        assert!(!m.dragging());
+        assert_eq!(m.cursor_moved((110.0, 100.0), 0.5), None);
+        // A press over the 3D view does; the sky follows the cursor.
+        m.button(LookButton::Left, true, false);
+        assert!(m.dragging());
+        assert_eq!(m.cursor_moved((130.0, 90.0), 0.5), Some((10.0, -5.0)));
+        // Release always ends it, even if egui claims the release.
+        m.button(LookButton::Left, false, true);
+        assert_eq!(m.cursor_moved((200.0, 90.0), 0.5), None);
+    }
+
+    #[test]
+    fn right_click_toggles_captured_look() {
+        let mut m = MouseLook::default();
+        assert_eq!(m.raw_motion((5.0, 0.0), 1.0), None);
+        assert_eq!(m.button(LookButton::Right, true, true), None, "not on the panel");
+        assert_eq!(m.button(LookButton::Right, true, false), Some(true));
+        assert!(m.captured());
+        // First-person: mouse right turns right (negative yaw), mouse down looks down.
+        assert_eq!(m.raw_motion((4.0, 2.0), 0.5), Some((-2.0, -1.0)));
+        // No drag while captured; releasing the right button changes nothing.
+        m.button(LookButton::Left, true, false);
+        assert!(!m.dragging());
+        assert_eq!(m.button(LookButton::Right, false, false), None);
+        // A second right click releases, even over the (now irrelevant) panel area.
+        assert_eq!(m.button(LookButton::Right, true, true), Some(false));
+        m.button(LookButton::Right, true, false);
+        assert!(m.release());
+        assert!(!m.captured() && !m.release());
     }
 }

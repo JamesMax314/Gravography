@@ -26,6 +26,8 @@ pub struct Status {
     pub ray_rates: Option<[f64; 5]>,
     /// Last message (screenshot saved, mode switches, resets, errors).
     pub message: String,
+    /// Mouse-look state: the cursor is captured.
+    pub mouse_captured: bool,
 }
 
 /// Editable copies of the flight controls.
@@ -68,6 +70,11 @@ pub fn settings_panel(
         ui.label(&status.gpu);
         ui.separator();
         flight_section(ui, flight, &mut actions);
+        ui.small(if status.mouse_captured {
+            "Mouse look captured: move the mouse to look. Right-click or Esc releases."
+        } else {
+            "Look around: drag with the left button, or right-click for mouse look."
+        });
         preset_section(ui, &mut flight.editor, check, &mut actions);
         ui.collapsing("Spacetime", |ui| {
             ui.add(
@@ -86,11 +93,12 @@ pub fn settings_panel(
         ui.separator();
         ui.collapsing("Keys", |ui| {
             for line in [
-                "drag: look around",
+                "left-drag: look around",
+                "right-click: captured mouse look (Esc releases)",
                 "W/S A/D R/F: thrust fwd/back, left/right, up/down",
                 "Space: cut thrust (free fall)",
                 "Enter: pause   .: step   [ ]: time warp",
-                "- =: thrust   P: screenshot   Esc: quit",
+                "- =: thrust   P: screenshot   Esc: quit (or release mouse)",
             ] {
                 ui.small(line);
             }
@@ -109,7 +117,7 @@ fn flight_section(ui: &mut egui::Ui, flight: &mut FlightPanel, actions: &mut Act
         .show(ui, |ui| {
             let s = &mut flight.settings;
             ui.horizontal(|ui| {
-                let label = if s.paused { "▶ Resume" } else { "⏸ Pause" };
+                let label = if s.paused { "Resume" } else { "Pause" };
                 if ui.button(label).clicked() {
                     s.paused = !s.paused;
                 }
@@ -130,7 +138,7 @@ fn flight_section(ui: &mut egui::Ui, flight: &mut FlightPanel, actions: &mut Act
             ui.add(
                 egui::Slider::new(&mut s.mass_solar, 1.0..=1e10)
                     .logarithmic(true)
-                    .text("mass (M☉)"),
+                    .text("mass (M_sun)"),
             );
             ui.horizontal(|ui| {
                 if ui.button("Cut thrust").clicked() {
@@ -254,7 +262,7 @@ pub fn hud_lines(hud: &Hud, status: &Status, settings: &FlightSettings, render_s
             None => "v vs ZAMO: — (no ZAMOs inside the horizon)".to_string(),
         },
         format!(
-            "acceleration {:.3e} c²/M = {:.3e} g ({} M☉)",
+            "acceleration {:.3e} c²/M = {:.3e} g (M = {} M_sun)",
             hud.acceleration, hud.acceleration_g, settings.mass_solar
         ),
         format!("{}, {}", region_name(hud.region), motion_name(&hud.motion)),
@@ -327,7 +335,7 @@ mod tests {
             "φ =",
             "v vs ZAMO",
             "γ =",
-            " g (10 M☉)",
+            " g (M = 10 M_sun)",
             "outside the ergosphere",
             "hovering",
             "a = 0.500",
