@@ -1,0 +1,21 @@
+[package]
+name = "gravography-app"
+description = "Gravography interactive black-hole viewer and headless render CLI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "gravography"
+path = "src/main.rs"
+
+[dependencies]
+gravography-physics.workspace = true
+gravography-sky.workspace = true
+gravography-render.workspace = true
+
+[lints]
+workspace = true

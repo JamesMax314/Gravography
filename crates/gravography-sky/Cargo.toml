@@ -1,0 +1,15 @@
+[package]
+name = "gravography-sky"
+description = "Spectra, colour science, procedural star field and sky baking for Gravography."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+gravography-physics.workspace = true
+
+[lints]
+workspace = true

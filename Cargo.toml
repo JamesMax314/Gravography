@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/JamesMax314/Gravography"
+authors = ["Gravography contributors"]
+
+[workspace.dependencies]
+gravography-physics = { path = "crates/gravography-physics" }
+gravography-sky = { path = "crates/gravography-sky" }
+gravography-render = { path = "crates/gravography-render" }
+
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_code = "deny"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+# Library code must not unwrap (CLAUDE.md §6); tests are exempt via clippy.toml.
+unwrap_used = "warn"
+# Floats are compared with `approx`, never `==` (CLAUDE.md §4).
+float_cmp = "warn"
+dbg_macro = "warn"
+todo = "warn"
+
+[profile.release]
+debug = "line-tables-only"
+
+# Physics tests are numerically heavy; keep them reasonably fast in `cargo test`.
+[profile.dev.package."*"]
+opt-level = 2

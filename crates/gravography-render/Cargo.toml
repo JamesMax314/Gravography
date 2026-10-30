@@ -1,0 +1,16 @@
+[package]
+name = "gravography-render"
+description = "Rendering backends for Gravography: CPU f64 reference renderer and wgpu GPU renderer."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+gravography-physics.workspace = true
+gravography-sky.workspace = true
+
+[lints]
+workspace = true
