@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use gravography_physics::{RayStatus, TraceParams};
 use gravography_render::cpu::status_index;
-use gravography_render::gpu::{DebugView, GpuContext, GpuRenderer, GpuSky};
+use gravography_render::gpu::{DebugView, GpuContext, GpuFrame, GpuRenderer, GpuSky, GpuStats, GpuTimer};
 use gravography_render::parity::{frame_for, parity_cameras};
 use gravography_render::tonemap::{luminance, to_srgb8};
 use gravography_render::{CpuRenderer, CpuSettings, FrameParams, HdrImage, Scene, Sky, display_scale};
@@ -436,4 +436,79 @@ fn present_pass_matches_tonemap() {
         worst <= 1,
         "present pass differs from the tone map by {worst} levels"
     );
+}
+
+#[test]
+fn gpu_timer_measures_a_sample() {
+    // WP-12: the GPU busy time of a sample is positive, no longer than the blocking wall-clock time of the same
+    // submission, and comes back with its tag. How it scales with the pixel count is printed but not asserted:
+    // other GPU tests running in parallel share the device and inflate busy times unpredictably (CLAUDE.md §4).
+    let Some(ctx) = GpuContext::for_tests("gpu_timer_measures_a_sample") else {
+        return;
+    };
+    let path = &scene_files()[2];
+    let renderer = GpuRenderer::new(&ctx);
+    let params = TraceParams::gpu_default();
+    let mut timer = GpuTimer::new();
+    let mut time = |w: u32, h: u32| {
+        let (frame, sky) = test_scene(path, w, h, 1);
+        let gpu_sky = GpuSky::upload(&ctx, &sky).expect("upload");
+        let target = GpuFrame::new(&ctx, frame.width, frame.height, 2000);
+        let _ = timer.wait(&ctx);
+        let mut best = f64::INFINITY;
+        for i in 0..3 {
+            let t = std::time::Instant::now();
+            timer.begin();
+            renderer
+                .render_sample(&ctx, &frame, &gpu_sky, &params, &target, i)
+                .expect("render");
+            timer.finish(&ctx, w as f32);
+            let (ms, tag) = timer.wait(&ctx).expect("completion is reported after waiting");
+            assert_eq!(tag, w as f32);
+            let wall = t.elapsed().as_secs_f64() * 1e3;
+            assert!(ms > 0.0 && ms <= wall, "GPU {ms} ms vs wall {wall} ms");
+            best = best.min(ms);
+        }
+        best
+    };
+    let small = time(320, 180);
+    let large = time(1280, 720);
+    println!("GPU time: {small:.3} ms at 320×180, {large:.3} ms at 1280×720");
+    assert_eq!(timer.wait(&ctx), None, "nothing left in flight");
+}
+
+#[test]
+fn gpu_stats_match_cpu_readbacks() {
+    // WP-12: the GPU statistics pass reproduces the CPU log-average luminance of the read-back image (f32 partial
+    // sums of ln Y over 256 pixels, combined in f64: relative error ≲ 1e-5 for these sizes; bound 1e-4) and the
+    // exact ray-status counts of the G-buffer. Sizes that are not multiples of 256 exercise the partial last group.
+    let Some(ctx) = GpuContext::for_tests("gpu_stats_match_cpu_readbacks") else {
+        return;
+    };
+    let renderer = GpuRenderer::new(&ctx);
+    let mut stats = GpuStats::new(&ctx);
+    for (k, path) in scene_files().iter().enumerate() {
+        let (frame, sky) = test_scene(path, 333 + 7 * k as u32, 187, 2);
+        let gpu_sky = GpuSky::upload(&ctx, &sky).expect("upload");
+        let out = renderer
+            .render(&ctx, &frame, &gpu_sky, &TraceParams::gpu_default())
+            .expect("render");
+        assert!(stats.request(&ctx, &out));
+        let got = stats.wait(&ctx).expect("statistics arrive after waiting");
+        let hdr = renderer.read_hdr(&ctx, &out).expect("hdr");
+        let cpu = gravography_render::tonemap::log_average_luminance(&hdr.pixels);
+        let counts = renderer.read_stats(&ctx, &out).expect("stats").status;
+        println!(
+            "{}: GPU {:?} CPU {cpu:?}; status {:?}",
+            path.display(),
+            got.log_average,
+            got.status
+        );
+        assert_eq!(got.status, counts, "{}", path.display());
+        match (got.log_average, cpu) {
+            (Some(g), Some(c)) => assert!((g / c - 1.0).abs() < 1e-4, "{g} vs {c}"),
+            (g, c) => assert_eq!(g.is_some(), c.is_some()),
+        }
+    }
+    assert_eq!(stats.wait(&ctx), None, "nothing in flight");
 }

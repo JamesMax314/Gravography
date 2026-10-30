@@ -9,11 +9,15 @@ pub mod context;
 pub mod present;
 pub mod renderer;
 pub mod shader;
+pub mod stats;
 pub mod test_rays;
+pub mod timer;
 pub mod tracer;
 
 pub use context::GpuContext;
 pub use present::Presenter;
 pub use renderer::{DebugView, GpuFrame, GpuRenderer, GpuSky};
+pub use stats::{FrameStats, GpuStats};
 pub use test_rays::{GpuPhase, GpuRay, GpuRayResult, GpuTraceParams, TestRayPipeline};
+pub use timer::GpuTimer;
 pub use tracer::{GBuffer, GBufferTexel, GpuCamera, GpuTracer};

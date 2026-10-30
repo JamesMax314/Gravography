@@ -1,5 +1,6 @@
 //! `gravography`: interactive black-hole viewer (`docs/PRD.md` §4.2) and headless `render` CLI (FR-X2).
 
+mod bench;
 mod viewer;
 
 use std::path::{Path, PathBuf};
@@ -53,6 +54,8 @@ struct ViewArgs {
 enum Command {
     /// Render a scene file to an image without opening a window.
     Render(RenderArgs),
+    /// Measure GPU frame times (NF-1).
+    Bench(bench::BenchArgs),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -106,6 +109,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Some(Command::Render(args)) => render(&args),
+        Some(Command::Bench(args)) => bench::bench(&args),
         None => view(&cli.view),
     }
 }

@@ -20,10 +20,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, anyhow};
 use gravography_physics::TraceParams;
 use gravography_render::camera::Projection;
-use gravography_render::gpu::{GpuContext, GpuFrame, GpuRenderer, GpuSky, Presenter};
+use gravography_render::gpu::{GpuContext, GpuFrame, GpuRenderer, GpuSky, GpuStats, GpuTimer, Presenter};
 use gravography_render::output::write_rgb8_png;
 use gravography_render::scene::{ObserverSpec, PresetKind};
-use gravography_render::tonemap::log_average_luminance;
 use gravography_render::{FrameParams, Scene, Sky, write_image};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
@@ -35,7 +34,10 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 use self::flight::{Camera, Flight, Hud, check_preset};
 use self::input::{KeyAction, LookButton, MouseLook, ThrustKeys, degrees_per_pixel, key_action};
 use self::screenshot::screenshot_paths;
-use self::state::{Accumulation, ViewSettings, internal_size};
+use self::state::{
+    Accumulation, DynamicResolution, MOVE_HOLD, Metering, RESIZE_SETTLE, ViewSettings, gpu_budget_ms,
+    internal_size, min_moving_scale,
+};
 use self::ui::{FlightPanel, Status, hud_lines, hud_window, settings_panel};
 
 /// Viewer start-up options.
@@ -134,12 +136,24 @@ struct Gfx {
     mouse: MouseLook,
     /// Camera of the accumulated image.
     rendered: Option<Camera>,
-    /// When exposure and ray statistics were last read back.
-    last_meter: Option<Instant>,
+    /// Exposure/statistics metering schedule.
+    metering: Metering,
     /// Wall-clock time of the last flight update.
     last_update: Instant,
     /// Capture the next presented window frame (panel and HUD included) to this PNG.
     capture_to: Option<PathBuf>,
+    /// Moving-camera render scale (FR-R3).
+    dynres: DynamicResolution,
+    /// GPU time per sample.
+    timer: GpuTimer,
+    /// Exposure and ray statistics, computed on the GPU and read back asynchronously.
+    stats: GpuStats,
+    /// When the camera last changed.
+    last_move: Option<Instant>,
+    /// Window size the internal resolution is based on (lags the surface while a resize settles).
+    layout: (u32, u32),
+    /// A resize is waiting to settle ([`RESIZE_SETTLE`]).
+    resize_pending: Option<Instant>,
 }
 
 impl ApplicationHandler for App {
@@ -254,26 +268,33 @@ impl App {
         };
         let size = (gfx.config.width, gfx.config.height);
         let result = match self.smoke {
-            SmokeStage::Converge1 if gfx.accum.converged() => gfx.smoke_screenshot(&self.opts).map(|_| {
-                // A clearly different size; the window manager may adjust it, any change counts.
-                let logical = gfx
-                    .window
-                    .inner_size()
-                    .to_logical::<f64>(gfx.window.scale_factor());
-                let _ = gfx
-                    .window
-                    .request_inner_size(LogicalSize::new(logical.width * 0.75, logical.height * 0.8));
-                self.smoke = SmokeStage::Resizing { from: size };
-            }),
+            SmokeStage::Converge1
+                if gfx.accum.converged() && !gfx.stats.in_flight() && !gfx.metering.due() =>
+            {
+                gfx.smoke_screenshot(&self.opts).map(|_| {
+                    // A clearly different size; the window manager may adjust it, any change counts.
+                    let logical = gfx
+                        .window
+                        .inner_size()
+                        .to_logical::<f64>(gfx.window.scale_factor());
+                    let _ = gfx
+                        .window
+                        .request_inner_size(LogicalSize::new(logical.width * 0.75, logical.height * 0.8));
+                    self.smoke = SmokeStage::Resizing { from: size };
+                })
+            }
             SmokeStage::Resizing { from } => {
                 let now = gfx.window.inner_size();
                 if (now.width, now.height) != from {
                     gfx.resize(now);
+                    gfx.apply_resize(true);
                     self.smoke = SmokeStage::Converge2;
                 }
                 Ok(())
             }
-            SmokeStage::Converge2 if gfx.accum.converged() => {
+            SmokeStage::Converge2
+                if gfx.accum.converged() && !gfx.stats.in_flight() && !gfx.metering.due() =>
+            {
                 gfx.smoke_screenshot(&self.opts).and_then(|_| {
                     // Drag the view through the viewer's own mouse handlers (OS events cannot be injected here): the
                     // look must turn left and up ("grab the sky": drag right and down).
@@ -329,13 +350,27 @@ impl App {
                         "smoke test: inside the horizon at r = {:.3} M, τ = {:.3} M",
                         hud.r, hud.tau
                     );
+                    println!(
+                        "smoke test: while falling {:.0} fps, GPU {:.1} ms/sample, dynamic scale {:.3} ({}×{} of {}×{})",
+                        gfx.status.fps,
+                        gfx.status.gpu_ms.unwrap_or(f64::NAN),
+                        gfx.dynres.scale(),
+                        gfx.target.width,
+                        gfx.target.height,
+                        gfx.layout.0,
+                        gfx.layout.1
+                    );
                     self.smoke = SmokeStage::Converge3;
                     Ok(())
                 }
             }
-            SmokeStage::Converge3 if gfx.accum.converged() => gfx.smoke_screenshot(&self.opts).map(|_| {
-                self.smoke = SmokeStage::Finish;
-            }),
+            SmokeStage::Converge3
+                if gfx.accum.converged() && !gfx.stats.in_flight() && !gfx.metering.due() =>
+            {
+                gfx.smoke_screenshot(&self.opts).map(|_| {
+                    self.smoke = SmokeStage::Finish;
+                })
+            }
             SmokeStage::Finish if gfx.capture_to.is_none() => {
                 println!(
                     "smoke test passed: rendered, resized, flew through the horizon and wrote screenshots at each stage"
@@ -413,7 +448,8 @@ impl Gfx {
             // Few samples so the scripted check converges quickly.
             settings.samples = 4;
         }
-        let (w, h) = internal_size((config.width, config.height), settings.render_scale);
+        let window_size = (config.width, config.height);
+        let (w, h) = internal_size(window_size, settings.render_scale);
         let target = GpuFrame::new(&ctx, w, h, TraceParams::<f32>::gpu_default().max_steps);
         let status = Status {
             gpu: ctx.describe(),
@@ -443,14 +479,22 @@ impl Gfx {
             keys: ThrustKeys::default(),
             mouse: MouseLook::default(),
             rendered: None,
-            last_meter: None,
+            metering: Metering::default(),
             last_update: Instant::now(),
             capture_to: None,
+            dynres: DynamicResolution::new(min_moving_scale(window_size).max(0.5)),
+            timer: GpuTimer::new(),
+            stats: GpuStats::new(&ctx),
+            last_move: None,
+            layout: window_size,
+            resize_pending: None,
             ctx,
         })
     }
 
-    /// Reconfigures the surface and restarts accumulation at the new internal size.
+    /// Reconfigures the surface at once (cheap) but defers the new internal resolution until the size has been
+    /// stable for [`RESIZE_SETTLE`]; meanwhile the old image is presented stretched. Full-screen transitions
+    /// deliver a stream of sizes, and reallocating and re-rendering for each one made them lag (WP-12).
     fn resize(&mut self, size: PhysicalSize<u32>) {
         if size.width == 0 || size.height == 0 {
             return;
@@ -461,7 +505,34 @@ impl Gfx {
         self.config.width = size.width;
         self.config.height = size.height;
         self.surface.configure(&self.ctx.device, &self.config);
-        self.restart(true);
+        self.resize_pending = Some(Instant::now());
+    }
+
+    /// Applies a pending resize once it has settled (or at once with `force`).
+    fn apply_resize(&mut self, force: bool) {
+        if self
+            .resize_pending
+            .is_some_and(|t| force || t.elapsed() >= RESIZE_SETTLE)
+        {
+            self.resize_pending = None;
+            self.layout = (self.config.width, self.config.height);
+            self.restart(true);
+        }
+    }
+
+    /// Whether the camera changed within [`MOVE_HOLD`].
+    fn is_moving(&self) -> bool {
+        self.last_move.is_some_and(|t| t.elapsed() < MOVE_HOLD)
+    }
+
+    /// Render scale for this frame: the still scale, or the dynamic scale (never above it) while moving.
+    fn active_scale(&self) -> f32 {
+        let still = self.settings.render_scale;
+        if self.settings.dynamic_resolution && self.is_moving() {
+            self.dynres.scale().min(still)
+        } else {
+            still
+        }
     }
 
     /// Handles a mapped key. Thrust keys are tracked while held (releases always count, so keys cannot stick
@@ -552,17 +623,14 @@ impl Gfx {
     /// Restarts accumulation (reallocating the target if the internal size changed). `hard` (settings, size)
     /// re-meters exposure on the next sample; a camera move keeps the throttled metering of a moving view.
     fn restart(&mut self, hard: bool) {
-        let (w, h) = internal_size(
-            (self.config.width, self.config.height),
-            self.settings.render_scale,
-        );
+        let (w, h) = internal_size(self.layout, self.active_scale());
         if (w, h) != (self.target.width, self.target.height) {
             self.target = GpuFrame::new(&self.ctx, w, h, self.target.max_steps);
         }
         self.accum = Accumulation::new(self.settings.samples);
         self.rendered = Some(self.flight.camera());
         if hard {
-            self.last_meter = None;
+            self.metering.reset();
         }
     }
 
@@ -637,7 +705,7 @@ impl Gfx {
             &Hud::new(&self.flight, &self.keys),
             &status,
             &self.flight.settings,
-            self.settings.render_scale,
+            self.active_scale(),
         );
         let out = self.egui_ctx.run_ui(raw, |ui| {
             egui::Panel::left("settings").show(ui, |ui| {
@@ -663,7 +731,23 @@ impl Gfx {
             self.status.message = m;
         }
         let cam = self.flight.camera();
-        if self.rendered.is_none_or(|r| cam.differs(&r)) {
+        let moved = self.rendered.is_none_or(|r| cam.differs(&r));
+        if moved {
+            self.last_move = Some(now);
+        }
+        // Dynamic resolution from the GPU time of earlier moving samples (tag = their scale; still samples −1).
+        if let Some((ms, tag)) = self.timer.poll(&self.ctx) {
+            self.status.gpu_ms = Some(ms);
+            if tag > 0.0 && self.settings.dynamic_resolution {
+                let still = self.settings.render_scale;
+                let min = min_moving_scale(self.layout).min(still);
+                self.dynres
+                    .observe(ms, tag, gpu_budget_ms(self.settings.target_fps), min, still);
+            }
+        }
+        self.apply_resize(false);
+        let wanted = internal_size(self.layout, self.active_scale());
+        if moved || wanted != (self.target.width, self.target.height) {
             self.restart(false);
         }
         if actions.screenshot || std::mem::take(&mut self.screenshot_requested) {
@@ -678,6 +762,7 @@ impl Gfx {
         // One progressive sample per frame until converged.
         if let Some(s) = self.accum.next_sample() {
             let frame = self.frame_params(opts, self.target.width, self.target.height)?;
+            self.timer.begin();
             self.renderer.render_sample(
                 &self.ctx,
                 &frame,
@@ -686,22 +771,25 @@ impl Gfx {
                 &self.target,
                 s,
             )?;
+            let tag = if self.is_moving() {
+                self.active_scale()
+            } else {
+                -1.0
+            };
+            self.timer.finish(&self.ctx, tag);
             self.accum.advance();
-            if self
-                .accum
-                .meter_exposure_now(self.last_meter.map(|t| t.elapsed()))
-            {
-                if self.settings.exposure.auto {
-                    let hdr = self.renderer.read_hdr(&self.ctx, &self.target)?;
-                    if let Some(l) = log_average_luminance(&hdr.pixels) {
-                        self.log_average = Some(l);
-                    }
-                }
-                let stats = self.renderer.read_stats(&self.ctx, &self.target)?;
-                let n = stats.status.iter().sum::<u64>().max(1) as f64;
-                self.status.ray_rates = Some(stats.status.map(|c| c as f64 / n));
-                self.last_meter = Some(Instant::now());
+            self.metering.after_sample(&self.accum, Instant::now());
+        }
+        // A due metering waits for a free readback slot (see Metering).
+        let (stats, ctx, target) = (&mut self.stats, &self.ctx, &self.target);
+        self.metering
+            .try_request(Instant::now(), || stats.request(ctx, target));
+        // Exposure and ray statistics arrive a frame or two after they were requested.
+        if let Some(fs) = self.stats.poll(&self.ctx) {
+            if let Some(l) = fs.log_average {
+                self.log_average = Some(l);
             }
+            self.status.ray_rates = Some(fs.status_fractions());
         }
 
         // Upload egui texture changes before anything can skip the frame: egui sends each delta (including the
@@ -806,7 +894,13 @@ impl Gfx {
             .viewport_output
             .get(&egui::ViewportId::ROOT)
             .is_some_and(|v| v.repaint_delay.is_zero());
-        if !self.accum.converged() || egui_wants_repaint || !self.flight.settings.paused {
+        if !self.accum.converged()
+            || egui_wants_repaint
+            || !self.flight.settings.paused
+            || self.stats.in_flight()
+            || self.metering.due()
+            || self.resize_pending.is_some()
+        {
             self.window.request_redraw();
         }
         Ok(())
@@ -815,6 +909,15 @@ impl Gfx {
     /// FR-X1: renders the current view to convergence at the full window resolution and writes a tone-mapped PNG
     /// and a linear HDR EXR. The exposure scale is the one on screen (what you see is what you get).
     fn screenshot(&mut self, opts: &ViewerOptions) -> Result<(PathBuf, PathBuf)> {
+        // Never save with an unmetered auto exposure: if no statistics have arrived yet, wait for them once.
+        if self.settings.exposure.auto
+            && self.log_average.is_none()
+            && (self.stats.in_flight() || self.stats.request(&self.ctx, &self.target))
+            && let Some(fs) = self.stats.wait(&self.ctx)
+        {
+            self.log_average = fs.log_average;
+            self.status.ray_rates = Some(fs.status_fractions());
+        }
         let (w, h) = (self.config.width, self.config.height);
         let frame = self.frame_params(opts, w, h)?;
         let out = self
@@ -848,12 +951,7 @@ impl Gfx {
             self.capture_to = Some(png.with_file_name(name));
         }
         let hud = Hud::new(&self.flight, &self.keys);
-        for line in hud_lines(
-            &hud,
-            &self.status,
-            &self.flight.settings,
-            self.settings.render_scale,
-        ) {
+        for line in hud_lines(&hud, &self.status, &self.flight.settings, self.active_scale()) {
             println!("  hud: {line}");
         }
         println!("  exposure scale {:.4e}", self.exposure_scale());

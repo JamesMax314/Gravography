@@ -6,10 +6,13 @@ Written in Rust with `wgpu`; macOS (Apple Silicon) is the primary platform.
 
 **Status:** early development. The CPU physics (geodesics, observers), the sky model (colour science, star
 field, cube-map baking) and a CPU f64 reference renderer with a headless `render` command are implemented and
-tested. The GPU backend renders the same images as the CPU reference (PRD tests 15 and 16) in about a second,
-with FR-R6 debug views. The interactive viewer runs on macOS: free flight with thrust, mouse look, presets, time
-warp, a HUD, a live spin slider and effect toggles, with progressive refinement whenever the view is still.
-Performance tuning (dynamic resolution) is WP-12. See `docs/PRD.md` for the specification and
+tested. The GPU backend renders the same images as the CPU reference (PRD tests 15 and 16), with FR-R6 debug
+views. The interactive viewer runs on macOS at 60+ fps at 1080p:
+- free flight with thrust, mouse look, presets, time warp, a HUD, a live spin slider and effect toggles;
+- dynamic resolution while moving;
+- progressive refinement to full resolution when still.
+
+Bookmarks, camera paths and the remaining polish are WP-13. See `docs/PRD.md` for the specification and
 `docs/progress_report.md` for progress.
 
 ## Building
@@ -66,7 +69,20 @@ The left panel has these sections:
   below the photon orbit. Orbits below the ISCO get a warning.
 - **Spacetime:** the spin slider, usable in flight. It keeps the position and velocity.
 - **Effects:** lensing, frequency shift and beaming, each switchable.
-- **Render:** sample target, render scale (default 0.5), auto/manual exposure, tone map and screenshot.
+- **Render:**
+  - sample target and still scale (the internal resolution when the camera is at rest, default 1.0);
+  - dynamic resolution while moving, with its target frame rate (default 60 fps);
+  - auto/manual exposure, tone map and screenshot.
+
+**Performance.** While the camera moves, each frame is a fresh 1-sample image. Its internal resolution is chosen
+from the measured GPU time so that the target frame rate holds, but never below 960×540 pixels. When the camera
+stops, the view switches to the still scale and accumulates samples. On an M2 Pro at 1080p:
+
+- moving views run at 70–190 fps at the 0.5 scale;
+- a still view converges (16 samples) in 0.3–0.9 s.
+
+Window resizes, including full-screen transitions, take effect once the size has been stable for 150 ms. Until
+then the last image is stretched.
 
 The **HUD** (top right) shows:
 
@@ -105,6 +121,18 @@ image with 4 samples per pixel takes about a minute on an M1-class Mac; the GPU 
 cargo run --release -p gravography-app -- render --backend gpu --scene scenes/kerr_edge_on.toml --out target/screenshots/kerr.png
 cargo run --release -p gravography-app -- render --backend gpu --debug shift --scene scenes/fast_observer.toml --out target/screenshots/g.png
 ```
+
+Performance measurement (GPU time per sample at several render scales, static convergence, and optionally PRD
+test 15 with the same integrator settings):
+
+```bash
+cargo run --release -p gravography-app -- bench --scene scenes/kerr_edge_on.toml            # 1920×1080, scales 1, 0.75, 0.5
+cargo run --release -p gravography-app -- bench --width 2560 --height 1440 --scales 1,0.5 --parity
+```
+
+`bench` accepts overrides of the GPU integrator settings for tuning: `--rtol`, `--far-step`, `--horizon-step`,
+`--escape-factor`, `--escape-min`, `--horizon-eps`, `--capture-fraction`, `--blowup`, `--max-steps` and `--tile`.
+`--steps-map <dir>` writes the step-count heat maps.
 
 Example scenes in `scenes/`: `schwarzschild_far.toml` (static observer at 50 M), `kerr_edge_on.toml` (`a = 0.99`
 seen edge-on), `inside_horizon.toml` (free fall at r = 1.2 M inside a Schwarzschild horizon) and

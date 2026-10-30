@@ -138,9 +138,10 @@ impl GBuffer {
     }
 }
 
-/// Default tile side in pixels: 256² = 65 536 rays per submission. On an Apple M2 Pro a tile of the hardest
-/// parity camera completes in well under the macOS GPU watchdog (seconds); see the progress report.
-pub const DEFAULT_TILE: u32 = 256;
+/// Default tile side in pixels: 1024² ≈ 10⁶ rays per submission. After the WP-12 speed-ups a whole 1920×1080
+/// frame of the hardest scene takes ≈ 55 ms on an Apple M2 Pro, far below the macOS GPU watchdog (seconds); fewer
+/// submissions saved ≈ 10 % per frame compared with 256² tiles (progress report, WP-12).
+pub const DEFAULT_TILE: u32 = 1024;
 
 /// Workgroup size of `trace_pixels_main` (`@workgroup_size(8, 8)`).
 pub const WORKGROUP_SIDE: u32 = 8;
