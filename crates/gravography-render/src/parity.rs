@@ -14,6 +14,8 @@ use gravography_physics::{
 
 use crate::camera::Projection;
 use crate::cpu::{status_from_index, status_index};
+use crate::frame::{Effects, FrameParams};
+use crate::tonemap::{Exposure, ToneMap};
 
 /// A camera of the parity set.
 #[derive(Clone, Debug)]
@@ -129,6 +131,40 @@ pub fn camera_rays(cam: &ParityCamera, side: u32, fov_deg: f64) -> Vec<(Vec4<f64
         }
     }
     out
+}
+
+/// A square `side × side` frame for `cam` (rectilinear, vertical field of view `fov_deg`, one sample per pixel,
+/// all effects on), for per-pixel parity between the GPU tracer and [`crate::CpuRenderer`].
+pub fn frame_for(cam: &ParityCamera, side: u32, fov_deg: f64) -> FrameParams {
+    FrameParams {
+        kerr: cam.kerr,
+        position: cam.position,
+        tetrad: cam.tetrad,
+        width: side,
+        height: side,
+        projection: Projection::Rectilinear { fov_deg },
+        samples: 1,
+        effects: Effects::default(),
+        exposure: Exposure::default(),
+        tone_map: ToneMap::default(),
+    }
+}
+
+/// Whether pixel `i` of a `width`-wide status map lies within `radius` pixels (Chebyshev distance) of a pixel with
+/// a different status, i.e. near a status boundary such as the critical curve (PRD §9 test 15: disagreements must
+/// be confined there).
+pub fn near_status_boundary(status: &[RayStatus], width: usize, i: usize, radius: usize) -> bool {
+    let height = status.len() / width;
+    let (x, y) = (i % width, i / width);
+    let s = status[i];
+    for yy in y.saturating_sub(radius)..=(y + radius).min(height - 1) {
+        for xx in x.saturating_sub(radius)..=(x + radius).min(width - 1) {
+            if status[yy * width + xx] != s {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Rounds an f64 4-vector to f32 (the GPU input precision).
@@ -330,6 +366,18 @@ mod tests {
         assert_eq!(m.angle_errors.len(), 4);
         assert!(c.summary().contains("75.000%"));
         assert_eq!(compare(&[], &[]).angle_quantile(0.5), None);
+    }
+
+    #[test]
+    fn status_boundary_detection() {
+        // 5 × 3 map: a captured column at x = 2.
+        use RayStatus::{Captured as C, Escaped as E};
+        let m = [E, E, C, E, E, E, E, C, E, E, E, E, C, E, E];
+        assert!(near_status_boundary(&m, 5, 1, 1));
+        assert!(near_status_boundary(&m, 5, 2, 1));
+        assert!(!near_status_boundary(&m, 5, 0, 1));
+        assert!(near_status_boundary(&m, 5, 0, 2));
+        assert!(!near_status_boundary(&[E; 9], 3, 4, 5));
     }
 
     #[test]

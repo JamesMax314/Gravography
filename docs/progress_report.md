@@ -6,7 +6,7 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
 
 ## Current state
 
-- WP-00 to WP-07 done.
+- WP-00 to WP-08 done.
   - `gravography-physics`: Kerr–Schild metric and derivatives, Hamiltonian ray tracing (DOPRI5/RK4, termination,
     escape direction, `g = 1/p_t`), BL ↔ KS, radii, invariants, observer dynamics, tetrad boosts (WP-06).
   - `gravography-sky`: CIE 1931 table, Planck spectra, blackbody LUT, XYZ → sRGB, deterministic star catalogue,
@@ -17,14 +17,18 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
   - `gravography-render::gpu` (WP-07): headless wgpu device (`GpuContext`), WGSL assembly by ordered
     concatenation (`gpu/shader.rs`, shaders in `gpu/shaders/`), WGSL ports of the KS metric, the Hamiltonian
     RHS, RK4 and the ray tracer (step caps, termination), and an RK4 test-ray compute pipeline with readback.
+  - `gravography-render::gpu::tracer` (WP-08): per-pixel DOPRI5 trace pass in WGSL (camera rays generated on
+    the GPU), G-buffer `{dir, g, status, steps, rejected}` in a storage buffer, tiled dispatch (256² per
+    submission). `TraceParams::gpu_default()` holds the tuned f32 settings.
   - `gravography-render::parity` (WP-07): GPU ↔ CPU parity harness (10 fixed cameras, ray grids, status confusion
     matrix, angular-error quantiles).
   - `gravography` binary: `gravography render --scene … --out …png|exr [--width --height --samples --backend
     --no-cache]`. Only the CPU backend exists; the interactive viewer is not built yet.
 - PRD §9 tests 1–14 pass, as do FR-X3 (scene round trip) and a renderer lensing validation against the exact
-  Schwarzschild lens map. The RK4 GPU vs CPU-f32 vs CPU-f64 parity test runs on Metal and already meets the
-  test 15 thresholds for the RK4 batch.
-- **Next work package:** WP-08 — GPU ray tracer (DOPRI5 in WGSL, per-pixel trace pass, G-buffer, test 15).
+  Schwarzschild lens map. **PRD test 15 passes**: the GPU per-pixel tracer agrees with the CPU f64 reference
+  on 100% of ray statuses, with 99.97% of escape directions within 1e-3 rad.
+- **Next work package:** WP-09 — GPU shading & headless GPU render (test 16, FR-R6 debug views,
+  `--backend gpu`).
 - Toolchain: rustup, Rust **1.99.1** (`rust-toolchain.toml`).
 - The user approved shipping the CC BY-SA 4.0 CIE table (2026-10-30; see `THIRD_PARTY.md`).
 - Open questions for the user:
@@ -44,7 +48,7 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
 | WP-05 | Colour & sky | done | `wp-05` |
 | WP-06 | CPU reference renderer + headless CLI | done | `wp-06` |
 | WP-07 | GPU foundation | done | `wp-07` |
-| WP-08 | GPU ray tracer | not started | |
+| WP-08 | GPU ray tracer | done | `wp-08` |
 | WP-09 | GPU shading & headless GPU render | not started | |
 | WP-10 | Viewer shell | not started | |
 | WP-11 | Interactive flight | not started | |
@@ -84,6 +88,97 @@ Template for each entry (copy above the previous entry):
 **Notes for the next agent**
 -
 -->
+
+## WP-08 — GPU ray tracer — 2026-10-30 — COMPLETE
+
+**Summary**
+- **DOPRI5 in WGSL** (`dopri5.wgsl`): step with FSAL, scaled RMS error norm and step controller, ported from
+  `ode.rs` with the same tableau. `ray.wgsl` gains `trace_ray_dopri5`, which follows the Rust loop exactly:
+  rejected steps count toward `max_steps`, steps at or below `h_min` are accepted, and an error check comes
+  first. The termination block is factored into `ray_status_after_step`, which both WGSL tracers share. Its checks
+  run in the same order as the Rust code.
+- **Per-pixel trace pass** (`camera.wgsl`, `trace_pixels.wgsl`, `gpu/tracer.rs`):
+  - the camera ray is generated on the GPU (rectilinear projection, f32 tetrad, `ks_g_lo`);
+  - `g = 1/p_t`;
+  - the lensing / frequency-shift effect flags behave like `CpuRenderer::cast`;
+  - DOPRI5 trace → `GBufferTexel { dir_g, status, steps, rejected }`.
+- **Tiling:** the image is dispatched in tiles (`GpuTracer::tile`, default 256²), one submission per tile, so
+  no command buffer runs long enough to hit the watchdog. Results are bit-identical for any tile size (tested).
+- **GPU defaults:** `TraceParams::gpu_default()` in the physics crate:
+  - `rtol 1e-5`, `atol 1e-7`, `h_min 1e-6`, `max_steps 2000`;
+  - momentum blow-up `10⁴` (see Decisions).
+- **Test-ray DOPRI5:** new entry `trace_dopri5_main` and `TestRayPipeline::trace_dopri5`.
+- **Parity helpers:** `frame_for(camera, side, fov)` and `near_status_boundary`.
+
+**Key files/modules**
+- `crates/gravography-render/src/gpu/shaders/dopri5.wgsl`, `camera.wgsl`, `trace_pixels.wgsl`: new modules.
+- `crates/gravography-render/src/gpu/shaders/ray.wgsl`: DOPRI5 tracer, shared termination block.
+- `crates/gravography-render/src/gpu/tracer.rs`: `GpuTracer`, `GBuffer`, `GBufferTexel`, `GpuCamera`, `GpuTile`.
+- `crates/gravography-render/src/gpu/shader.rs`: `TRACE_PIXEL_MODULES`, `ALL_SHADERS`.
+- `crates/gravography-physics/src/ray.rs`: `TraceParams::gpu_default` and the `GPU_*` constants.
+- `crates/gravography-render/tests/gpu_tracer.rs`: test 15, tiling, effect flags, DOPRI5 test rays.
+
+**Decisions & deviations**
+- **GPU momentum blow-up factor `10⁴`** (CPU reference: `10⁸`). With `10⁸` the first test-15 run had 72
+  misclassified pixels deep inside the shadow of the Schwarzschild `r = 1.2` camera. Those rays approach the
+  white-hole horizon from inside, and `r − r_+ ≈ 1e-8` is unresolvable in f32. Measured over the parity set,
+  escaping rays peak at `|p|/|p₀| ≤ 12` and blow-up captures reach `10⁸`, so `10⁴` classifies identically to the
+  reference with an 800× margin. The classification logic is unchanged; only this parameter differs. Details
+  are in `docs/physics.md` § "GPU tracer tolerances".
+- **`rtol = 1e-5`:** `1e-4` gave identical agreement and only 3% fewer steps, because step caps dominate the
+  step count. The tighter value costs almost nothing.
+- **Test-15 boundary criterion:** a disagreeing pixel counts as "near the critical curve" if a pixel within
+  2 px (Chebyshev distance) has a different status in the CPU reference map. No disagreements remain, so the
+  criterion is not exercised.
+- **G-buffer layout:** a storage buffer of 32-byte texels, rather than textures. WP-09 shading can read it
+  directly. `dir_g.w` carries `g`; `rejected` is kept for diagnostics.
+- **Per-tile resources:** each tile gets its own small uniform buffer and bind group (no `write_buffer` reuse
+  between submissions). This is simple and the cost is negligible.
+- No new dependencies. PRD unchanged.
+
+**Tests**
+- `cargo test --workspace`: 196 passed, 2 ignored (sky production bake; `test15_full_resolution`).
+- **Test 15** (`test15_gpu_tracer_matches_cpu_reference`, 64²/camera, ~15 s):
+  - 100% status agreement; 0 disagreements;
+  - 99.97% within 1e-3 rad; p99 3.0e-5 rad;
+  - g error ≤ 2.7e-6.
+- **Ignored `test15_full_resolution`** (128²/camera, 163 840 rays, 63 s; run for this WP): 100% status
+  agreement; 99.97% within 1e-3; p99 2.9e-5 rad; g ≤ 3.3e-6; no step-budget exhaustion.
+- **`dopri5_test_rays_match_cpu_f32`:** GPU DOPRI5 vs CPU f32 DOPRI5, same inputs: 100% status agreement,
+  p99 3.0e-5 rad.
+- **`tiling_does_not_change_the_result`:** bit-identical G-buffers for tile sizes 256 and 24.
+- **`lensing_off_and_no_frequency_shift`:** straight-ray directions within 1e-5 rad of the CPU; `g = 1` exactly.
+- **Unit tests:** naga validation of both shaders and their entry points; every module is assembled; naga
+  layouts of `Camera`, `Tile`, `GBufferTexel` and `TraceParams`; `near_status_boundary`.
+
+**Visual checks**
+- None: there is no GPU image output until WP-09 (shading).
+
+**Performance**
+- On an Apple M2 Pro, the 64² × 10-camera GPU trace is a negligible part of the test, which is dominated by the
+  CPU f64 reference: about 41 k rays at rtol 1e-10.
+- Mean GPU steps are ≈ 100 per ray (≈ 290 for the Kerr 0.998 interior camera).
+- No GPU timings yet: timestamp queries are WP-12.
+
+**Known issues / tech debt**
+- **Persistent buffers:** `GpuTracer::trace` creates uniforms and bind groups per call. Make them persistent for
+  the per-frame viewer path (WP-10/12).
+- **Per-camera accuracy:** two cameras exceed 1e-3 rad at the 99th percentile on their own. At 128²:
+  - the Schwarzschild interior, at 1.5e-3 rad, where only ≈ 3% of its pixels escape, all near the strongly
+    blueshifted shadow edge;
+  - the overall p99 is 2.9e-5 rad, and the PRD criterion applies to the whole set.
+- **Rectilinear only:** the WGSL camera supports only the rectilinear projection, like the CPU.
+
+**Notes for the next agent (WP-09)**
+- **Shading:** read `GBuffer.buffer` in the shading pass: `dir_g.xyz` is the escape direction, `dir_g.w` is `g`,
+  and `status` follows `cpu::status_index`. Port `CpuRenderer::footprint` from neighbouring G-buffer texels.
+  The PRD asks for neighbours, not extra rays: the CPU uses ±0.25 px differential rays, so test 16 needs a
+  documented tolerance for that difference. Then port `Sky::lod` and `Sky::shade`, and the tone mapping from
+  `tonemap.rs`.
+- **Trace settings:** use `TraceParams::<f32>::gpu_default()` for the GPU trace. `GpuTracer::trace` takes a
+  jitter for progressive accumulation.
+- **Before ending WP-09:** run the ignored `test15_full_resolution`
+  (`cargo test -p gravography-render --test gpu_tracer -- --ignored`).
 
 ## WP-07 — GPU foundation — 2026-10-30 — COMPLETE
 

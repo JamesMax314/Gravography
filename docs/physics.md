@@ -581,8 +581,11 @@ up to rounding:
 | `kerr_schild.wgsl` | `ks_radius`, `ks_fields`, `ks_field_derivatives` |
 | `geodesic.wgsl` | `l_dot_p`, `ks_hamiltonian_rhs` |
 | `rk4.wgsl` | `ode::rk4_step` on the phase state `(x, p)` |
-| `ray.wgsl` | `spatial_norm`, `radial_rate`, `step_cap`, `escape_direction`, `trace_ray` (RK4 branch) |
-| `test_rays.wgsl` | parity entry points (`trace_rk4_main`, `eval_rhs_main`) |
+| `dopri5.wgsl` | `ode::{dopri5_step, error_norm, StepController::next_h}` (same tableau, constants rounded once to f32) |
+| `ray.wgsl` | `spatial_norm`, `radial_rate`, `step_cap`, `escape_direction`, `trace_ray` (DOPRI5 and RK4 branches; `ray_status_after_step` is the Rust loop's termination block) |
+| `camera.wgsl` | `Projection::direction` (rectilinear), `Tetrad::to_coordinate`, `ks_g_lo`, `camera_ray_momentum` |
+| `trace_pixels.wgsl` | `CpuRenderer::cast_pixel` (DOPRI5) → G-buffer `{dir, g, status, steps, rejected}` |
+| `test_rays.wgsl` | parity entry points (`trace_rk4_main`, `trace_dopri5_main`, `eval_rhs_main`) |
 
 Modules are concatenated in that order (`gpu/shader.rs`); naga validates the result in a unit test without a GPU.
 
@@ -606,3 +609,36 @@ Apple M2 Pro (Metal):
 
 So f32 precision, not the GPU port, dominates the error budget. Both are well inside PRD §9 test 15
 (≥ 99.5% status, 1e-3 rad for ≥ 99% of rays).
+
+### GPU tracer tolerances
+
+`TraceParams::gpu_default()` (WP-08): DOPRI5, `rtol = 1e-5`, `atol = 1e-7`, `h_min = 1e-6`, at most 2000 steps,
+momentum blow-up factor `10⁴`. The escape radius, step caps and horizon criterion are those of the CPU reference.
+
+- **Momentum blow-up factor.** Inside the horizon, the rays in the shadow approach the past (white-hole) horizon
+  from inside. In ingoing KS their covariant momentum diverges, and the CPU reference (factor `10⁸`) only catches
+  them at `r − r_+ ≈ 10⁻⁸`. That is below f32 resolution near `r = 2` (ulp ≈ 2.4e-7). With the CPU factor, the
+  GPU stepped such rays across `r_+`, and 72 of 16 384 pixels of the Schwarzschild `r = 1.2` camera came out
+  `Escaped` or `Error` instead of `Captured`, far inside the shadow.
+- **Why `10⁴` is safe.** Over the parity set, no escaping ray's `|p|/|p₀|` exceeds 12 (Kerr `a = 0.998`, near
+  critical). The rays caught by blow-up all reach `10⁸`. A factor of `10⁴` therefore classifies exactly as the
+  reference does, with a ≈ 800× margin, and it triggers while `r − r_+` is still resolvable in f32.
+- **Tolerance makes no difference.** `rtol = 1e-4` gives the same agreement and only 3% fewer steps (98 vs 101 per
+  ray). Away from the critical curve the step count is set by the step caps (`far_step_factor = 0.1`), and the
+  error is set by f32. WP-12 should tune the caps rather than `rtol`.
+
+**Test 15** (WP-08, Apple M2 Pro). The 10 parity cameras, 128 × 128 pixels each over a 90° field
+(163 840 rays), GPU per-pixel tracer vs CPU f64 reference (`rtol = 1e-10`):
+
+| Check | Result | PRD threshold |
+|---|---|---|
+| Status agreement | 100% | ≥ 99.5% |
+| Disagreements away from a status boundary | 0 | — |
+| Escaped rays within 1e-3 rad | 99.97% | ≥ 99% |
+| Angle, p50 / p99 | 2.1e-7 / 2.9e-5 rad | — |
+| Max `g` relative error | 3.3e-6 | — |
+| Mean GPU steps per ray | 100 (most 287, Kerr 0.998 interior) | — |
+| Rays hitting the step budget | 0 | — |
+
+The largest angular errors (≤ 1.1e-2 rad) are near-critical rays of the `r = 4` prograde orbiter and of the
+Kerr interior cameras, where tiny differences are hugely amplified.

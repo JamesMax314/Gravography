@@ -1,4 +1,4 @@
-// test_rays.wgsl: compute entry points for the GPU ↔ CPU parity harness (WP-07). One invocation per test ray.
+// test_rays.wgsl: compute entry points for the GPU ↔ CPU parity harness. One invocation per test ray.
 
 // Input ray (Rust: GpuRay; 32 bytes).
 struct Ray {
@@ -19,6 +19,15 @@ fn trace_rk4_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     results[i] = trace_ray_rk4(params, rays[i].x, rays[i].p);
+}
+
+@compute @workgroup_size(64)
+fn trace_dopri5_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if (i >= params.ray_count) {
+        return;
+    }
+    results[i] = trace_ray_dopri5(params, rays[i].x, rays[i].p);
 }
 
 @compute @workgroup_size(64)
