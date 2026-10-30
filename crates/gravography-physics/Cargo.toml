@@ -17,4 +17,4 @@ workspace = true
 
 [dev-dependencies]
 approx = "0.5.1"
-proptest = "1.11.0"
+proptest = "1.12.0"

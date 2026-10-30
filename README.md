@@ -15,7 +15,7 @@ cargo test --workspace
 cargo run --release -p gravography-app
 ```
 
-Requires Rust 1.87 or newer (edition 2024); the pinned version is in `rust-toolchain.toml`.
+Requires Rust 1.99 or newer (edition 2024); the pinned version is in `rust-toolchain.toml`.
 
 ## Layout
 
