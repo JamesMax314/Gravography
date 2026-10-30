@@ -584,7 +584,12 @@ up to rounding:
 | `dopri5.wgsl` | `ode::{dopri5_step, error_norm, StepController::next_h}` (same tableau, constants rounded once to f32) |
 | `ray.wgsl` | `spatial_norm`, `radial_rate`, `step_cap`, `escape_direction`, `trace_ray` (DOPRI5 and RK4 branches; `ray_status_after_step` is the Rust loop's termination block) |
 | `camera.wgsl` | `Projection::direction` (rectilinear), `Tetrad::to_coordinate`, `ks_g_lo`, `camera_ray_momentum` |
+| `gbuffer.wgsl` | G-buffer texel and tile structs |
 | `trace_pixels.wgsl` | `CpuRenderer::cast_pixel` (DOPRI5) → G-buffer `{dir, g, status, steps, rejected}` |
+| `sky.wgsl` | `dir_to_face_uv`, `CubeLevel::sample_bilinear`, `CubeMap::sample_trilinear`, `BlackbodyLut::lookup`, `Sky::{texel_solid_angle, lod, shade}` |
+| `shade.wgsl` | `CpuRenderer::footprint` (neighbour form) + `Projection::pixel_solid_angle`; accumulation |
+| `tonemap.wgsl` | `tonemap::{aces_fitted, reinhard_extended, to_srgb8}`, `srgb_encode` |
+| `debug.wgsl` | FR-R6 debug views (no CPU counterpart) |
 | `test_rays.wgsl` | parity entry points (`trace_rk4_main`, `trace_dopri5_main`, `eval_rhs_main`) |
 
 Modules are concatenated in that order (`gpu/shader.rs`); naga validates the result in a unit test without a GPU.
@@ -642,3 +647,52 @@ momentum blow-up factor `10⁴`. The escape radius, step caps and horizon criter
 
 The largest angular errors (≤ 1.1e-2 rad) are near-critical rays of the `r = 4` prograde orbiter and of the
 Kerr interior cameras, where tiny differences are hugely amplified.
+
+### GPU shading
+
+`gpu/renderer.rs`, `sky.wgsl`, `shade.wgsl`, `tonemap.wgsl` (WP-09). For each sample `k` (jitter `sample_offset(k)`,
+as on the CPU), the trace pass writes the G-buffer. The shading pass then computes, per escaped pixel:
+
+- **Footprint from neighbours.** `J_x = d(x+1) − d(x)` from the neighbouring G-buffer texel, which was traced at
+  the same jitter. If that neighbour did not escape or is outside the image, the shader uses `−(d(x−1) − d(x))`.
+  The same applies to `y`, followed by the CPU's isotropic and unlensed fallbacks. This is
+  `CpuRenderer::footprint` with `ε = 1` px, at no extra ray cost.
+- **Shading:** `Sky::shade` with the same LOD formula and footprint `/ N`.
+- **Accumulation:** the linear sRGB result is added to an accumulation buffer `(Σ rgb, count)`.
+
+The cube map is a 6-layer RG32Float 2D-array texture with all mips, read with `textureLoad`. The shader does the
+bilinear interpolation (clamped at face edges) and the linear interpolation between levels itself, exactly as the
+CPU does. Binding it as a non-filterable texture also avoids the optional `FLOAT32_FILTERABLE` feature. RG16F is not
+usable: `w·T` reaches ~10⁶, beyond the f16 range.
+
+**Tone mapping** runs on the GPU and writes packed RGBA8. The exposure scale comes from the HDR readback with the
+CPU's `display_scale`, so it is deterministic. The shader rounds half away from zero with `floor(x + 0.5)`, not
+WGSL `round`, to match Rust.
+
+**Debug views** (FR-R6), drawn from the last sample's G-buffer:
+- **status:** escaped blue `(0.2, 0.4, 1)`, captured black, singular yellow, max-steps red, error magenta;
+- **shift:** `log₂ g` over `[−2, 2]`, from red (redshift) through white (`g = 1`) to blue (blueshift); non-escaped
+  pixels are dark grey;
+- **steps:** `log(1 + steps)/log(1 + budget)`, a black → purple → orange → pale-yellow heat map.
+
+**Test 16** (`tests/gpu_render.rs`). Each scene in `scenes/` is rendered by the GPU (`gpu_default` tracer) and by
+the CPU reference, with a small sky (256² faces, 2·10⁴ stars) at 96 × 54 (default) and 192 × 108 × 2 spp (ignored).
+Four metrics are compared:
+- the total luminance;
+- the mean relative pixel luminance `|ΔY| / (Y + 0.1 Ȳ)`;
+- the fraction of pixels whose tone-mapped bytes differ by more than 8 levels;
+- the same three against a CPU render with `ε = 1` px (the GPU's footprint method).
+
+Worst measured on an M2 Pro:
+
+| Comparison | Total luminance | Mean relative | Pixels > 8 levels |
+|---|---|---|---|
+| vs reference (`ε = 0.25`) | 0.46% | 2.0% | 3.3% |
+| vs same method (`ε = 1`) | 1.4e-4 | 1.1e-3 | 0.19% |
+
+Bounds (`ε = 0.25`): 1% / 4% / 6%. Bounds (`ε = 1`): 1e-3 / 3e-3 / 0.5%.
+
+All of the remaining difference from the reference is the footprint method. It changes the mip level where the lens
+map curves within a pixel (critical curve, photon rings, the strongly lensed interior view). The CPU footprint
+(differential rays at ±0.25 px) is the better estimate of the local Jacobian. The GPU's neighbour differences average
+the Jacobian over a pixel, which matters only where the map is far from linear across a pixel.

@@ -85,6 +85,20 @@ pub fn write_image(path: &Path, image: &HdrImage, scale: f64, tone_map: ToneMap)
     Ok(())
 }
 
+/// Writes 8-bit RGB pixels (row-major, `width × height × 3` bytes) as a PNG, creating parent directories.
+///
+/// # Errors
+/// I/O or encoding errors, or a byte count that does not match the size.
+pub fn write_rgb8_png(path: &Path, width: u32, height: u32, bytes: Vec<u8>) -> Result<(), RenderError> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    let buf = ImageBuffer::<Rgb<u8>, _>::from_raw(width, height, bytes)
+        .ok_or_else(|| RenderError::InvalidScene("pixel buffer does not match the image size".into()))?;
+    buf.save_with_format(path, image::ImageFormat::Png)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

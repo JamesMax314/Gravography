@@ -34,8 +34,18 @@ pub const DOPRI5: ShaderModule = wgsl_module!("dopri5.wgsl");
 pub const RAY: ShaderModule = wgsl_module!("ray.wgsl");
 /// Camera rays: projection, tetrad, initial momentum (ports of `camera.rs`, `Tetrad`, `camera_ray_momentum`).
 pub const CAMERA: ShaderModule = wgsl_module!("camera.wgsl");
+/// G-buffer texel and tile structs.
+pub const GBUFFER: ShaderModule = wgsl_module!("gbuffer.wgsl");
 /// Per-pixel trace pass writing the G-buffer.
 pub const TRACE_PIXELS: ShaderModule = wgsl_module!("trace_pixels.wgsl");
+/// Cube-map sampling, LUT lookup and spectral shading (ports of `cubemap.rs`, `band.rs`, `sky.rs`).
+pub const SKY: ShaderModule = wgsl_module!("sky.wgsl");
+/// Shading pass: footprint from neighbours, sky sample, accumulation.
+pub const SHADE: ShaderModule = wgsl_module!("shade.wgsl");
+/// Exposure, tone mapping and sRGB encoding (port of `tonemap.rs`).
+pub const TONEMAP: ShaderModule = wgsl_module!("tonemap.wgsl");
+/// FR-R6 debug views.
+pub const DEBUG: ShaderModule = wgsl_module!("debug.wgsl");
 /// Entry points for the parity harness.
 pub const TEST_RAYS: ShaderModule = wgsl_module!("test_rays.wgsl");
 
@@ -58,7 +68,7 @@ pub fn assemble(modules: &[ShaderModule]) -> String {
 pub const TEST_RAY_MODULES: [ShaderModule; 7] = [COMMON, KERR_SCHILD, GEODESIC, RK4, DOPRI5, RAY, TEST_RAYS];
 
 /// Modules of the per-pixel trace shader, in dependency order.
-pub const TRACE_PIXEL_MODULES: [ShaderModule; 8] = [
+pub const TRACE_PIXEL_MODULES: [ShaderModule; 9] = [
     COMMON,
     KERR_SCHILD,
     GEODESIC,
@@ -66,13 +76,37 @@ pub const TRACE_PIXEL_MODULES: [ShaderModule; 8] = [
     DOPRI5,
     RAY,
     CAMERA,
+    GBUFFER,
     TRACE_PIXELS,
 ];
 
+/// Modules of the shading shader (the camera module needs the tracer's types and metric).
+pub const SHADE_MODULES: [ShaderModule; 10] = [
+    COMMON,
+    KERR_SCHILD,
+    GEODESIC,
+    RK4,
+    DOPRI5,
+    RAY,
+    CAMERA,
+    GBUFFER,
+    SKY,
+    SHADE,
+];
+
+/// Modules of the tone-map shader.
+pub const TONEMAP_MODULES: [ShaderModule; 2] = [COMMON, TONEMAP];
+
+/// Modules of the debug-view shader.
+pub const DEBUG_MODULES: [ShaderModule; 3] = [COMMON, GBUFFER, DEBUG];
+
 /// Every assembled shader (name, modules), for validation tests.
-pub const ALL_SHADERS: [(&str, &[ShaderModule]); 2] = [
+pub const ALL_SHADERS: [(&str, &[ShaderModule]); 5] = [
     ("test_rays", &TEST_RAY_MODULES),
     ("trace_pixels", &TRACE_PIXEL_MODULES),
+    ("shade", &SHADE_MODULES),
+    ("tonemap", &TONEMAP_MODULES),
+    ("debug", &DEBUG_MODULES),
 ];
 
 /// Source of the test-ray shader (entry points `trace_rk4_main`, `trace_dopri5_main`, `eval_rhs_main`).
@@ -83,6 +117,21 @@ pub fn test_ray_shader() -> String {
 /// Source of the per-pixel trace shader (entry point `trace_pixels_main`).
 pub fn trace_pixel_shader() -> String {
     assemble(&TRACE_PIXEL_MODULES)
+}
+
+/// Source of the shading shader (entry point `shade_main`).
+pub fn shade_shader() -> String {
+    assemble(&SHADE_MODULES)
+}
+
+/// Source of the tone-map shader (entry point `tonemap_main`).
+pub fn tonemap_shader() -> String {
+    assemble(&TONEMAP_MODULES)
+}
+
+/// Source of the debug-view shader (entry point `debug_main`).
+pub fn debug_shader() -> String {
+    assemble(&DEBUG_MODULES)
 }
 
 #[cfg(test)]
