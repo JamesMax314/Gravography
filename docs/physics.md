@@ -214,8 +214,89 @@ Bardeen's spherical-photon-orbit constants `ξ = L_z/E` and `η = Q/E²` (Append
 `dL_z/dλ` and `dQ/dλ` along the Hamiltonian vector field are zero to finite-difference accuracy (property test,
 also run with 10⁶ cases).
 
+## Ray tracing
+
+Code: `crates/gravography-physics/src/{ode,tetrad,ray,distant}.rs`.
+
+### Initial conditions
+
+The camera tetrad `{e_(0) = u, e_(1) = forward, e_(2) = left, e_(3) = up}` is built by Gram–Schmidt with
+respect to `g` (`Tetrad::gram_schmidt`: `e_0 = u/√(−u·u)`, then `v ← v − Σ_b η_bb g(v, e_b) e_b`, done twice for
+robustness). For a unit viewing direction `n` (camera frame), the traced vector is the past-directed null
+`k = −e_(0) + nⁱ e_(i)`, and `p = g(k)` is integrated with Hamilton's equations. The physical photon is
+`P = −k`, with `−P·u = 1`. With sources at rest at infinity (`u_emit = ∂_t`),
+`g = ν_obs/ν_emit = (−P·u)/(−P_t) = 1/p_t` (`sky_frequency_shift`). A static Schwarzschild observer gets
+`g = (1 − 2M/r)^{−1/2}` (unit test).
+
+### Integrators
+
+DOPRI5 (Dormand & Prince 1980; tableau in Hairer, Nørsett & Wanner, *Solving ODEs I*) with FSAL, local
+extrapolation, scaled RMS error `‖e/(atol + rtol max(|y|, |y_new|))‖ ≤ 1`, and controller
+`h_new = h · clamp(0.9 err^{−1/5}, 0.2, 5)`. RK4 is the classical scheme, with steps set only by the heuristic caps.
+Both are tested for their convergence order (5 and 4).
+
+### Step caps
+
+Applied on top of the adaptive step and converted to `λ` with the current coordinate rates:
+
+- coordinate displacement `≤ far_step_factor · r` (default 0.1);
+- for exterior rays moving inward, **radial** displacement `|Δr| ≤ horizon_step_factor · (r − r_+)` (default
+  0.1), with `dr/dλ = ∂_i r ẋⁱ`.
+
+The first version capped the *total* displacement near the horizon. For `a = 0.998`, near-critical prograde rays
+orbit at `r_ph ≈ 1.074`, just outside `r_+ ≈ 1.063`, and needed ~10⁴ steps per orbit, exceeding the 10⁵-step budget.
+Capping only radial motion fixed this (~5–10·10³ steps) without affecting the approach to the past horizon.
+
+### Termination and classification
+
+Checked after every accepted step, in this order:
+
+1. any non-finite state or RHS → `Error`;
+2. `r < r_singular` (1e-3) → `Singular`;
+3. `r > r_escape` with `r` increasing → `Escaped`, `r_escape = max(escape_factor · r_cam, escape_min_radius)`;
+4. `r < r_+ + horizon_epsilon` (1e-3) with `r` decreasing, or `max|p_i| > 10⁸ max|p(0)|` → `Captured`;
+5. accepted + rejected steps `≥ max_steps` (10⁵ on the CPU) → `MaxSteps`.
+
+Rule 4 relies on exterior photons never turning around below the prograde photon orbit, which lies above
+`r_+ + 10⁻³` for every allowed spin (`r_ph,pro − r_+ ≈ 0.0074` at `a = 0.999`, `0.011` at `a = 0.998`). For a camera inside the horizon,
+past-directed rays have `r` increasing in the region between the horizons. They cross the future horizon
+outward, which ingoing KS covers regularly, so rule 4 does not fire on the way out.
+
+### Escape direction
+
+The escape direction is the unit spatial part of `dx/dλ` at termination. **No weak-field correction is applied.**
+The PRD suggests one as optional, and the standard Newtonian-like correction `n_∞ ∝ n − 2M b⃗/(R(R + s₀))` was
+implemented first, but it made the result *worse* (9·10⁻⁴ rad error instead of 6·10⁻⁶ at `R = 100`). In ingoing KS
+coordinates the traced outgoing ray, an ingoing photon in forward time, is nearly parallel to the ingoing null
+congruence `l`. Radial ingoing null rays are straight lines in these coordinates, so the remaining coordinate
+bending is suppressed by `(b/R)²`. Measured convergence is `≈ R⁻⁴` (each doubling of `R` cuts the error 14–20×).
+The CPU reference therefore uses `r_escape = max(16 r_cam, 400)`, which keeps the error below `3·10⁻⁷` rad in the
+tests (cost: ~8 extra steps per doubling of `R`). The PRD's `k = 2, R_min = 100` gives errors up to `1.4·10⁻³` rad
+for sideways rays from a camera at `r ≈ 30`. The GPU defaults are for WP-08/WP-12 to choose; `k ≥ 4` keeps the
+error below `10⁻⁴`.
+
+### Distant observer (Bardeen image coordinates)
+
+`Kerr::bardeen_ray`: for an observer at BL `(r_obs, i, φ_obs)` and image coordinates `(α, β)`,
+`ξ = −α sin i`, `η = β² + cos²i (α² − a²)` (`E = 1`). The physical BL momentum is `p_t = −1`, `p_φ = ξ`, `p_θ = β`
+(since `Θ(i) = η + a² cos²i − ξ² cot²i = β²`), and `p_r = +√R/Δ` with `R = (r² + a² − aξ)² − Δ(η + (ξ − a)²)`.
+The traced momentum is minus this, transformed to KS. Because the constants of motion are the exact asymptotic
+ones, the traced geodesic is exactly the one seen at infinity. `r_obs` only sets where the trace starts, so tests
+built on it (b_c, shadow edges) have no finite-distance error. Sign conventions: `β > 0` toward `+z`; prograde
+photons (`ξ > 0`) appear at `α < 0`.
+
+### Validation (PRD §9)
+
+| Test | Result |
+|---|---|
+| 4 Conservation (a = 0.9, 85 rays, r > r_+ + 0.5) | `|H|/|p|² ≤ 5e-11`, `ΔL_z ≤ 5e-11`, `ΔQ ≤ 7e-11` (relative), `p_t` bit-exact |
+| 5 `b_c = 3√3` | bisection error 3e-10 |
+| 6 Weak deflection, b = 500…5000 | relative to the 2-term series 4e-5 … 4e-7 (the next series term) |
+| 7 Strong deflection vs orbit quadrature, b = 5.3…40 | `Δφ` error 3e-9 … 2e-11 rad |
+| 8 Kerr shadow edges, a = 0.5, 0.9, 0.998 | relative 1e-9 … 3e-11; also via a static camera at r = 1e4 (ξ to 1e-6, α ≈ −r sinψ to 1e-3) |
+| 12 Escape-direction convergence | ≈ R⁻⁴; default error ≤ 3e-7 rad |
+
 ## Sections (to be written)
 
-- Ray initial conditions, termination and classification — WP-03
 - Observer dynamics and Fermi–Walker transport — WP-04
 - Colour pipeline and sky representation — WP-05

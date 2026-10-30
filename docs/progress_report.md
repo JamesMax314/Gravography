@@ -6,12 +6,12 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
 
 ## Current state
 
-- WP-00, WP-01 and WP-02 done. `gravography-physics` has: the scalar abstraction (`Real` for f32/f64), 4×4
-  linear algebra, the Kerr–Schild metric with analytic first derivatives, Christoffel symbols, the Hamiltonian
-  and its right-hand side (`ks_hamiltonian_rhs`, the form to port to WGSL), the invariants `E`, `L_z` and
-  Carter `Q`, BL ↔ KS transforms, and the characteristic radii. No integrators, ray tracing, observer, sky or
-  rendering yet.
-- **Next work package:** WP-03 — CPU ray tracing.
+- WP-00 to WP-03 done. `gravography-physics` has the full single-ray CPU pipeline: Kerr–Schild metric and
+  derivatives, Hamiltonian RHS, invariants, BL ↔ KS transforms, radii, Gram–Schmidt tetrads, DOPRI5/RK4,
+  `trace_ray` with termination/classification and escape direction, camera-ray initial conditions with
+  `g = 1/p_t`, and a Bardeen distant-observer helper. PRD §9 tests 1–8 and 12 pass. No observer dynamics, sky
+  or rendering yet.
+- **Next work package:** WP-04 — Observer.
 - Toolchain: rustup, pinned to stable **1.99.1** (`rust-toolchain.toml`). Plain `cargo fmt/clippy/test`
   work; the old `PATH=/opt/homebrew/bin` workaround is obsolete (Homebrew Rust is uninstalled).
 - Open questions for the user: none.
@@ -25,7 +25,7 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
 | WP-00 | Repository bootstrap | done | `wp-00` |
 | WP-01 | Metric core | done | `wp-01` |
 | WP-02 | Derivatives, Hamiltonian, invariants | done | `wp-02` |
-| WP-03 | CPU ray tracing | not started | |
+| WP-03 | CPU ray tracing | done | `wp-03` |
 | WP-04 | Observer | not started | |
 | WP-05 | Colour & sky | not started | |
 | WP-06 | CPU reference renderer + headless CLI | not started | |
@@ -70,6 +70,89 @@ Template for each entry (copy above the previous entry):
 **Notes for the next agent**
 -
 -->
+
+## WP-03 — CPU ray tracing — 2026-10-30 — COMPLETE
+
+**Summary**
+- `ode`: generic RK4 and DOPRI5 (FSAL, embedded error), scaled RMS `error_norm`, `StepController`.
+- `tetrad`: `Tetrad { e_up[a][μ] }` (legs u, forward, left, up), `gram_schmidt` w.r.t. `g` (two passes),
+  `to_coordinate`, `orthonormality_error`.
+- `ray`: `camera_ray_momentum` (`p = g(−e₀ + nⁱeᵢ)`), `sky_frequency_shift` (`g = 1/p_t`), `TraceParams`
+  (`cpu_reference()`), `trace_ray` / `trace_ray_observed` (callback per accepted step), `RayStatus`, `RayResult`,
+  `escape_direction`, `PhaseState` pack/unpack.
+- `distant`: `Kerr::bardeen_ray` (exact constants of motion from `(α, β)`).
+- `PhysicsError::NoSuchRay`.
+- Validation suite `crates/gravography-physics/tests/ray_validation.rs` (PRD tests 4–8, 12).
+- `docs/physics.md` § "Ray tracing": initial conditions, integrators, step caps, termination, escape direction,
+  Bardeen helper, validation table.
+
+**Key files/modules**
+- `crates/gravography-physics/src/ode.rs`: integrators (physics-free).
+- `crates/gravography-physics/src/tetrad.rs`: tetrads and Gram–Schmidt (WP-04 reuses it).
+- `crates/gravography-physics/src/ray.rs`: the tracer. Termination order is documented in the module doc.
+- `crates/gravography-physics/src/distant.rs`: Bardeen distant observer.
+- `crates/gravography-physics/tests/ray_validation.rs`: analytic validation (≈3.5 s in debug).
+
+**Decisions & deviations**
+- **No weak-field escape-direction correction** (PRD §5.6 calls it optional). The standard correction was
+  implemented, measured and removed: it increased the error from 6e-6 to 9e-4 rad. In ingoing KS the coordinate
+  direction already converges ≈ R⁻⁴ (see `docs/physics.md` § "Escape direction").
+- **CPU escape radius `max(16 r_cam, 400)`** instead of the PRD's example `max(2 r_cam, 100)`. The example gives
+  errors up to 1.4e-3 rad (sideways rays, camera at r = 30); 16× gives ≤ 3e-7 for ~16 extra steps. The GPU value is
+  left to WP-08/WP-12 (≥ 4× recommended, error < 1e-4).
+- **Step caps are geometric, not raw `h` bounds.** Coordinate displacement `≤ 0.1 r`, plus *radial*
+  displacement `≤ 0.1 (r − r_+)` for exterior inward rays, converted to `λ` with the current rates. A
+  total-displacement horizon cap made near-critical a = 0.998 rays hit MaxSteps (≈10⁴ steps per orbit at r ≈ 1.074).
+  The radial cap fixed it.
+- `dr/dλ > 0` for escape and `< 0` for capture are tested by comparing `r` with the previous accepted step.
+- Momentum blow-up threshold is relative: `max|p_i| > 1e8 · max|p(0)|`.
+- Steps below `h_min` are accepted anyway (no stalling); MaxSteps counts accepted + rejected steps.
+- RK4 uses the heuristic caps only (no error control); `h_max` acts as "no cap" for it.
+- Bardeen sign conventions: `β > 0` toward `+z`; prograde photons appear at `α < 0` (consistent with the
+  Appendix A formula `α = −ξ/sin i`).
+- Test changes during development: RK4-vs-DOPRI5 originally compared at a fixed `r_escape`, where the two
+  runs' different stopping radii dominated. It now uses `r_escape = 1e7` and checks 4th-order convergence (ratio
+  16.6). The tetrad property test no longer uses `prop_assume`, which hit proptest's global-reject limit at 10⁴ cases.
+- No new dependencies.
+
+**Tests**
+- 84 passed, 0 ignored (76 unit + 8 validation); unit property suites also pass at `PROPTEST_CASES=10000`.
+- Test 4: 85 rays (66 escaped, 19 captured), a = 0.9, camera at r = 20, θ = 60°: drifts `|H|/|p|² ≤ 4.9e-11`,
+  `ΔL_z ≤ 4.5e-11`, `ΔQ ≤ 7.4e-11` (relative, tolerance 1e-8), `p_t` bit-identical.
+- Test 5: `b_c` error 3.2e-10 (tolerance 1e-5).
+- Test 6: relative error vs `4/b + 15π/(4b²)`: 4.3e-5 (b = 500), 1.1e-5, 2.7e-6, 4.3e-7 (b = 5000). These match the
+  size of the next series term (tolerance 1e-3).
+- Test 7: Δφ vs Gauss–Legendre quadrature of the orbit equation over the same radial range: 2.8e-9 (b = 5.3)
+  down to 2e-11 (tolerance 1e-6).
+- Test 8: shadow edges on β = 0, a ∈ {0.5, 0.9, 0.998}: relative error ≤ 1.1e-9 (tolerance 1e-3). Camera-pipeline
+  version (static observer at r = 1e4): edge ξ to 1e-6, `α ≈ −r sinψ` within 1e-3 (measured finite-distance offsets 2.7e-5 prograde, 1.5e-4 retrograde).
+- Test 12: error vs R = (2, 4, 8, 16)·r_cam falls 14–20× per doubling; default error ≤ 2.6e-7 rad (tolerance 1e-6).
+- Unit: DOPRI5 tableau consistency, 5th/4th-order convergence, error-estimate scaling, FSAL, adaptive driver;
+  Gram–Schmidt orthonormality in Kerr (1e-12); camera momentum null with `−P·u = 1` and static blueshift;
+  radial capture/escape; inside-horizon camera escapes; MaxSteps reporting; flat-space straight rays.
+
+**Visual checks**
+- n/a (first renders in WP-06).
+
+**Performance**
+- Not optimised. Typical CPU ray: ~20–300 accepted steps; near-critical a = 0.998 rays 4–10·10³ steps. The validation
+  suite takes 3.4 s in debug.
+
+**Known issues / tech debt**
+- `trace_ray` uses `kerr.r()` separately from the RHS evaluation (one extra `r` per step). Fine for the CPU.
+- Termination near the inner horizon / for cameras inside `r_−` is not exercised (cameras there are forbidden, PRD
+  §5.8). WP-04 must enforce the limit.
+
+**Notes for the next agent**
+- WP-04: `Tetrad::gram_schmidt` is the re-orthonormalisation routine (keep `e_(0) = u` by seeding with `u`). The
+  KS-normal observer `n^μ = −g^{μt}` is timelike everywhere (also inside the horizon) and is a handy fallback.
+- Test 9 (SR limit) can use `Kerr::with_mass(1e-12, 0)`; `Kerr` does not allow `M = 0`, but the free functions do.
+- Test 10 (static blueshift) is already checked at the camera in `ray::tests::camera_momentum_is_null_and_normalised`.
+  WP-04 should test it through the observer API and several directions.
+- `ode` is generic over `[T; N]`: observer integration can use `dopri5_step` with a 4 + 4 + 16 state, or a
+  hand-rolled state.
+- The PRD's GPU default `max_steps ≲ 1000` is too small for near-critical high-spin rays (see Performance).
+  Expect MaxSteps there and track the rate, as the PRD intends.
 
 ## WP-02 — Derivatives, Hamiltonian, invariants — 2026-10-30 — COMPLETE
 
