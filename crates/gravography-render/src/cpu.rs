@@ -105,6 +105,18 @@ pub fn status_index(s: RayStatus) -> usize {
     }
 }
 
+/// Inverse of [`status_index`] (`None` for codes ≥ 5). Used for GPU status codes.
+pub fn status_from_index(i: u32) -> Option<RayStatus> {
+    Some(match i {
+        0 => RayStatus::Escaped,
+        1 => RayStatus::Captured,
+        2 => RayStatus::Singular,
+        3 => RayStatus::MaxSteps,
+        4 => RayStatus::Error,
+        _ => return None,
+    })
+}
+
 /// Sub-pixel offset of sample `s`: the R2 low-discrepancy sequence (M. Roberts, "The unreasonable effectiveness
 /// of quasirandom sequences", 2018) started at the pixel centre, `frac(½ + s (1/φ₂, 1/φ₂²))` with `φ₂` the
 /// plastic number. Sample 0 is the centre, so one sample per pixel samples centres.
@@ -319,6 +331,20 @@ mod tests {
             exposure: Exposure::default(),
             tone_map: ToneMap::default(),
         }
+    }
+
+    #[test]
+    fn status_codes_round_trip() {
+        for s in [
+            RayStatus::Escaped,
+            RayStatus::Captured,
+            RayStatus::Singular,
+            RayStatus::MaxSteps,
+            RayStatus::Error,
+        ] {
+            assert_eq!(status_from_index(status_index(s) as u32), Some(s));
+        }
+        assert_eq!(status_from_index(5), None);
     }
 
     #[test]

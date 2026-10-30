@@ -30,6 +30,9 @@ pub enum RenderError {
     /// Image encoding failed.
     #[error("image output: {0}")]
     Image(#[from] image::ImageError),
+    /// GPU device, shader or readback failure.
+    #[error("GPU: {0}")]
+    Gpu(String),
     /// File-system error.
     #[error("I/O: {0}")]
     Io(#[from] std::io::Error),
