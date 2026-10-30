@@ -19,7 +19,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
 use gravography_physics::TraceParams;
-use gravography_render::camera::Projection;
 use gravography_render::gpu::{GpuContext, GpuFrame, GpuRenderer, GpuSky, GpuStats, GpuTimer, Presenter};
 use gravography_render::output::write_rgb8_png;
 use gravography_render::scene::{ObserverSpec, PresetKind};
@@ -32,7 +31,7 @@ use winit::keyboard::PhysicalKey;
 use winit::window::{CursorGrabMode, Window, WindowId};
 
 use self::flight::{Camera, Flight, Hud, check_preset};
-use self::input::{KeyAction, LookButton, MouseLook, ThrustKeys, degrees_per_pixel, key_action};
+use self::input::{KeyAction, LookButton, MouseLook, ThrustKeys, key_action};
 use self::screenshot::screenshot_paths;
 use self::state::{
     Accumulation, DynamicResolution, MOVE_HOLD, Metering, RESIZE_SETTLE, ViewSettings, gpu_budget_ms,
@@ -213,7 +212,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                gfx.cursor_moved((position.x, position.y), &self.opts);
+                gfx.cursor_moved((position.x, position.y));
             }
             WindowEvent::Focused(false) => {
                 // Key releases are lost while unfocused: drop held keys so thrust does not stick.
@@ -238,7 +237,7 @@ impl ApplicationHandler for App {
     fn device_event(&mut self, _event_loop: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
         // Raw motion drives the captured mouse look (the cursor itself is locked and hidden).
         if let (Some(gfx), DeviceEvent::MouseMotion { delta }) = (self.gfx.as_mut(), event) {
-            let deg = gfx.degrees_per_pixel(&self.opts);
+            let deg = gfx.degrees_per_pixel();
             if let Some((dy, dp)) = gfx.mouse.raw_motion(delta, deg) {
                 gfx.flight.look_by(dy, dp);
                 gfx.window.request_redraw();
@@ -302,13 +301,13 @@ impl App {
                         f64::from(gfx.config.width) * 0.6,
                         f64::from(gfx.config.height) * 0.5,
                     );
-                    gfx.cursor_moved((cx, cy), &self.opts);
+                    gfx.cursor_moved((cx, cy));
                     gfx.mouse_button(LookButton::Left, true, false);
                     anyhow::ensure!(
                         gfx.mouse.dragging(),
                         "a left press over the 3D view did not start a drag"
                     );
-                    gfx.cursor_moved((cx + 200.0, cy + 100.0), &self.opts);
+                    gfx.cursor_moved((cx + 200.0, cy + 100.0));
                     gfx.mouse_button(LookButton::Left, false, false);
                     let look = gfx.flight.look;
                     anyhow::ensure!(
@@ -577,9 +576,8 @@ impl Gfx {
     }
 
     /// Mouse-look sensitivity for the current window (degrees per physical pixel at the image centre).
-    fn degrees_per_pixel(&self, opts: &ViewerOptions) -> f64 {
-        let Projection::Rectilinear { fov_deg } = opts.scene.camera.projection;
-        degrees_per_pixel(fov_deg, self.config.height)
+    fn degrees_per_pixel(&self) -> f64 {
+        self.settings.projection.degrees_per_pixel(self.config.height)
     }
 
     /// A mouse button press or release (`consumed`: egui wants it).
@@ -590,8 +588,8 @@ impl Gfx {
     }
 
     /// Cursor moved: turns the view while dragging.
-    fn cursor_moved(&mut self, pos: (f64, f64), opts: &ViewerOptions) {
-        let deg = self.degrees_per_pixel(opts);
+    fn cursor_moved(&mut self, pos: (f64, f64)) {
+        let deg = self.degrees_per_pixel();
         if let Some((dy, dp)) = self.mouse.cursor_moved(pos, deg) {
             self.flight.look_by(dy, dp);
             self.window.request_redraw();
@@ -635,7 +633,7 @@ impl Gfx {
     }
 
     /// Frame parameters for a `width × height` render of the current camera with the current settings.
-    fn frame_params(&self, opts: &ViewerOptions, width: u32, height: u32) -> Result<FrameParams> {
+    fn frame_params(&self, width: u32, height: u32) -> Result<FrameParams> {
         let cam = self.flight.camera();
         let frame = FrameParams {
             kerr: cam.kerr,
@@ -643,7 +641,7 @@ impl Gfx {
             tetrad: cam.tetrad,
             width,
             height,
-            projection: opts.scene.camera.projection,
+            projection: self.settings.projection,
             samples: self.settings.samples,
             effects: self.settings.effects,
             exposure: self.settings.exposure,
@@ -761,7 +759,7 @@ impl Gfx {
 
         // One progressive sample per frame until converged.
         if let Some(s) = self.accum.next_sample() {
-            let frame = self.frame_params(opts, self.target.width, self.target.height)?;
+            let frame = self.frame_params(self.target.width, self.target.height)?;
             self.timer.begin();
             self.renderer.render_sample(
                 &self.ctx,
@@ -919,7 +917,7 @@ impl Gfx {
             self.status.ray_rates = Some(fs.status_fractions());
         }
         let (w, h) = (self.config.width, self.config.height);
-        let frame = self.frame_params(opts, w, h)?;
+        let frame = self.frame_params(w, h)?;
         let out = self
             .renderer
             .render(&self.ctx, &frame, &self.sky, &TraceParams::gpu_default())?;

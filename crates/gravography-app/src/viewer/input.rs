@@ -120,14 +120,6 @@ impl ThrustKeys {
     }
 }
 
-/// Mouse-look sensitivity: degrees of yaw/pitch per physical pixel of drag, chosen so that the sky follows the
-/// cursor at the centre of a rectilinear view of vertical field of view `fov_deg` on a window `height` pixels tall.
-pub fn degrees_per_pixel(fov_deg: f64, height: u32) -> f64 {
-    let h = f64::from(height.max(1));
-    // Centre of a pinhole image: one pixel subtends 2 tan(fov/2) / h radians.
-    (2.0 * (0.5 * fov_deg.to_radians()).tan() / h).to_degrees()
-}
-
 /// Look-rotation change `(Δyaw, Δpitch)` in degrees for a drag of `(dx, dy)` physical pixels ("grab the sky":
 /// dragging right turns the view left, i.e. positive yaw; dragging down looks up, i.e. positive pitch, since
 /// window `y` grows downward).
@@ -262,14 +254,8 @@ mod tests {
     }
 
     #[test]
-    fn mouse_sensitivity_matches_pinhole_centre() {
-        // 90° fov on 1000 px: one pixel at the centre subtends 2 tan(45°)/1000 = 2e-3 rad.
-        assert_relative_eq!(
-            degrees_per_pixel(90.0, 1000),
-            2e-3_f64.to_degrees(),
-            max_relative = 1e-14
-        );
-        assert!(degrees_per_pixel(60.0, 0).is_finite());
+    fn drag_scales_with_sensitivity() {
+        // Sensitivity itself: Projection::degrees_per_pixel (render crate, tested there).
         assert_eq!(drag_to_look(10.0, -4.0, 0.5), (5.0, -2.0));
     }
 

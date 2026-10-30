@@ -6,7 +6,8 @@ use gravography_render::ToneMap;
 use gravography_render::scene::{MAX_SPIN, ObserverSpec, PresetKind};
 
 use super::flight::{FlightSettings, Hud, PresetCheck, THRUST_RANGE, WARP_RANGE, preset_name};
-use super::state::{MAX_SAMPLE_TARGET, RENDER_SCALE_RANGE, ViewSettings};
+use super::state::{FOV_RANGE, MAX_SAMPLE_TARGET, RENDER_SCALE_RANGE, ViewSettings};
+use gravography_render::Projection;
 
 /// Read-only status shown in the panel and HUD.
 #[derive(Clone, Debug, Default)]
@@ -196,6 +197,27 @@ fn preset_section(ui: &mut egui::Ui, spec: &mut ObserverSpec, check: &PresetChec
 
 fn render_section(ui: &mut egui::Ui, settings: &mut ViewSettings, actions: &mut Actions) {
     ui.collapsing("Render", |ui| {
+        let rectilinear = matches!(settings.projection, Projection::Rectilinear { .. });
+        egui::ComboBox::from_label("projection")
+            .selected_text(if rectilinear {
+                "rectilinear"
+            } else {
+                "equirectangular 360°"
+            })
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(rectilinear, "rectilinear").clicked() && !rectilinear {
+                    settings.projection = Projection::Rectilinear { fov_deg: 60.0 };
+                }
+                if ui
+                    .selectable_label(!rectilinear, "equirectangular 360°")
+                    .clicked()
+                {
+                    settings.projection = Projection::Equirectangular;
+                }
+            });
+        if let Projection::Rectilinear { fov_deg } = &mut settings.projection {
+            ui.add(egui::Slider::new(fov_deg, FOV_RANGE.0..=FOV_RANGE.1).text("vertical FOV (°)"));
+        }
         ui.add(
             egui::Slider::new(&mut settings.samples, 1..=MAX_SAMPLE_TARGET)
                 .text("samples")

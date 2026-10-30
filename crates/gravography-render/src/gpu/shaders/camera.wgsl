@@ -21,14 +21,26 @@ struct Camera {
     flags: u32,
     // Sub-pixel sample offset in [0, 1)² (pixel (i, j) is traced at (i + jitter.x, j + jitter.y)).
     jitter: vec2<f32>,
-    _pad: vec2<u32>,
+    // PROJECTION_RECTILINEAR or PROJECTION_EQUIRECTANGULAR.
+    projection: u32,
+    _pad: u32,
 }
+
+// Projection codes (Rust: gravography_render::gpu::tracer::PROJECTION_*).
+const PROJECTION_RECTILINEAR: u32 = 0u;
+const PROJECTION_EQUIRECTANGULAR: u32 = 1u;
+const PI: f32 = 3.14159265358979323846;
 
 // Unit direction (forward, left, up) through continuous pixel coordinate (x, y) (Rust: Projection::direction).
 fn projection_direction(cam: Camera, x: f32, y: f32) -> vec3<f32> {
-    let t = cam.tan_half_fov;
     let w = f32(cam.width);
     let h = f32(cam.height);
+    if (cam.projection == PROJECTION_EQUIRECTANGULAR) {
+        let lon = -PI * (2.0 * x / w - 1.0);
+        let lat = PI * (0.5 - y / h);
+        return vec3<f32>(cos(lat) * cos(lon), cos(lat) * sin(lon), sin(lat));
+    }
+    let t = cam.tan_half_fov;
     return normalize(vec3<f32>(1.0, -(2.0 * x / w - 1.0) * t * w / h, (1.0 - 2.0 * y / h) * t));
 }
 
