@@ -131,6 +131,43 @@ impl Accumulation {
     }
 }
 
+/// Exposure/statistics metering schedule. A metering becomes due when [`Accumulation::meter_exposure_now`] says
+/// so, and stays due until a request is accepted. The GPU readback slots may all be busy at that moment, and the
+/// metering at convergence must not be lost: a still view would otherwise keep the exposure and ray rates of the
+/// motion before it (WP-12 bug, seen as 81% "escaped" rays inside the horizon).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Metering {
+    due: bool,
+    last: Option<std::time::Instant>,
+}
+
+impl Metering {
+    /// Records the sample just rendered.
+    pub fn after_sample(&mut self, accum: &Accumulation, now: std::time::Instant) {
+        if accum.meter_exposure_now(self.last.map(|t| now.saturating_duration_since(t))) {
+            self.due = true;
+        }
+    }
+
+    /// If a metering is due, tries `request` (returns whether the GPU accepted it); clears the due flag on success.
+    pub fn try_request(&mut self, now: std::time::Instant, request: impl FnOnce() -> bool) {
+        if self.due && request() {
+            self.due = false;
+            self.last = Some(now);
+        }
+    }
+
+    /// Whether a metering is waiting for a free slot.
+    pub fn due(&self) -> bool {
+        self.due
+    }
+
+    /// Forgets the last metering time, so the next first sample meters at once (new size or settings).
+    pub fn reset(&mut self) {
+        self.last = None;
+    }
+}
+
 /// Dynamic resolution while the camera moves (`docs/PRD.md` FR-R3, NF-1). GPU time per sample is roughly
 /// proportional to the pixel count, `t ∝ s²`, so the scale that meets the budget is `s · sqrt(t_target / t)`. The
 /// controller moves halfway there (geometrically) per measurement, at most ×/÷ [`DynamicResolution::MAX_STEP`],
@@ -309,5 +346,39 @@ mod tests {
         let mut d = DynamicResolution::new(0.5);
         assert!(!d.observe(10.4, 0.5, 10.0, 0.25, 1.0));
         assert!(!d.observe(9.6, 0.5, 10.0, 0.25, 1.0));
+    }
+
+    #[test]
+    fn a_refused_metering_at_convergence_is_retried() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let mut m = Metering::default();
+        let mut a = Accumulation::new(2);
+        // First sample: due, and accepted.
+        a.advance();
+        m.after_sample(&a, t0);
+        let mut calls = 0;
+        m.try_request(t0, || {
+            calls += 1;
+            true
+        });
+        assert!(!m.due() && calls == 1);
+        // Convergence 10 ms later: due again (always at convergence), but every readback slot is busy.
+        a.advance();
+        let t1 = t0 + Duration::from_millis(10);
+        m.after_sample(&a, t1);
+        m.try_request(t1, || false);
+        assert!(m.due(), "the converged metering must not be dropped");
+        // No more samples are rendered after convergence; the next frame's retry succeeds.
+        m.try_request(t1 + Duration::from_millis(16), || true);
+        assert!(!m.due());
+        // Moving view (first samples within METER_INTERVAL): throttled, nothing due.
+        let mut moving = Accumulation::new(16);
+        moving.advance();
+        m.after_sample(&moving, t1 + Duration::from_millis(20));
+        assert!(!m.due());
+        m.reset();
+        m.after_sample(&moving, t1 + Duration::from_millis(21));
+        assert!(m.due(), "after a reset the first sample meters at once");
     }
 }

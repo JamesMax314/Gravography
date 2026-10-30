@@ -35,8 +35,8 @@ use self::flight::{Camera, Flight, Hud, check_preset};
 use self::input::{KeyAction, LookButton, MouseLook, ThrustKeys, degrees_per_pixel, key_action};
 use self::screenshot::screenshot_paths;
 use self::state::{
-    Accumulation, DynamicResolution, MOVE_HOLD, RESIZE_SETTLE, ViewSettings, gpu_budget_ms, internal_size,
-    min_moving_scale,
+    Accumulation, DynamicResolution, MOVE_HOLD, Metering, RESIZE_SETTLE, ViewSettings, gpu_budget_ms,
+    internal_size, min_moving_scale,
 };
 use self::ui::{FlightPanel, Status, hud_lines, hud_window, settings_panel};
 
@@ -136,8 +136,8 @@ struct Gfx {
     mouse: MouseLook,
     /// Camera of the accumulated image.
     rendered: Option<Camera>,
-    /// When exposure and ray statistics were last read back.
-    last_meter: Option<Instant>,
+    /// Exposure/statistics metering schedule.
+    metering: Metering,
     /// Wall-clock time of the last flight update.
     last_update: Instant,
     /// Capture the next presented window frame (panel and HUD included) to this PNG.
@@ -268,7 +268,9 @@ impl App {
         };
         let size = (gfx.config.width, gfx.config.height);
         let result = match self.smoke {
-            SmokeStage::Converge1 if gfx.accum.converged() && !gfx.stats.in_flight() => {
+            SmokeStage::Converge1
+                if gfx.accum.converged() && !gfx.stats.in_flight() && !gfx.metering.due() =>
+            {
                 gfx.smoke_screenshot(&self.opts).map(|_| {
                     // A clearly different size; the window manager may adjust it, any change counts.
                     let logical = gfx
@@ -290,7 +292,9 @@ impl App {
                 }
                 Ok(())
             }
-            SmokeStage::Converge2 if gfx.accum.converged() && !gfx.stats.in_flight() => {
+            SmokeStage::Converge2
+                if gfx.accum.converged() && !gfx.stats.in_flight() && !gfx.metering.due() =>
+            {
                 gfx.smoke_screenshot(&self.opts).and_then(|_| {
                     // Drag the view through the viewer's own mouse handlers (OS events cannot be injected here): the
                     // look must turn left and up ("grab the sky": drag right and down).
@@ -360,7 +364,9 @@ impl App {
                     Ok(())
                 }
             }
-            SmokeStage::Converge3 if gfx.accum.converged() && !gfx.stats.in_flight() => {
+            SmokeStage::Converge3
+                if gfx.accum.converged() && !gfx.stats.in_flight() && !gfx.metering.due() =>
+            {
                 gfx.smoke_screenshot(&self.opts).map(|_| {
                     self.smoke = SmokeStage::Finish;
                 })
@@ -473,7 +479,7 @@ impl Gfx {
             keys: ThrustKeys::default(),
             mouse: MouseLook::default(),
             rendered: None,
-            last_meter: None,
+            metering: Metering::default(),
             last_update: Instant::now(),
             capture_to: None,
             dynres: DynamicResolution::new(min_moving_scale(window_size).max(0.5)),
@@ -624,7 +630,7 @@ impl Gfx {
         self.accum = Accumulation::new(self.settings.samples);
         self.rendered = Some(self.flight.camera());
         if hard {
-            self.last_meter = None;
+            self.metering.reset();
         }
     }
 
@@ -772,14 +778,12 @@ impl Gfx {
             };
             self.timer.finish(&self.ctx, tag);
             self.accum.advance();
-            if self
-                .accum
-                .meter_exposure_now(self.last_meter.map(|t| t.elapsed()))
-                && self.stats.request(&self.ctx, &self.target)
-            {
-                self.last_meter = Some(Instant::now());
-            }
+            self.metering.after_sample(&self.accum, Instant::now());
         }
+        // A due metering waits for a free readback slot (see Metering).
+        let (stats, ctx, target) = (&mut self.stats, &self.ctx, &self.target);
+        self.metering
+            .try_request(Instant::now(), || stats.request(ctx, target));
         // Exposure and ray statistics arrive a frame or two after they were requested.
         if let Some(fs) = self.stats.poll(&self.ctx) {
             if let Some(l) = fs.log_average {
@@ -894,6 +898,7 @@ impl Gfx {
             || egui_wants_repaint
             || !self.flight.settings.paused
             || self.stats.in_flight()
+            || self.metering.due()
             || self.resize_pending.is_some()
         {
             self.window.request_redraw();

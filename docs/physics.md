@@ -254,11 +254,43 @@ Checked after every accepted step, in this order:
 1. any non-finite state or RHS → `Error`;
 2. `r < r_singular` (1e-3) → `Singular`;
 3. `r > r_escape` with `r` increasing → `Escaped`, `r_escape = max(escape_factor · r_cam, escape_min_radius)`;
-4. `r < r_+ + horizon_epsilon` (1e-3) with `r` decreasing, or `max|p_i| > 10⁸ max|p(0)|` → `Captured`;
+4. `r < r_+ + capture_margin` with `r` decreasing, or `max|p_i| > 10⁸ max|p(0)|` → `Captured`, where
+   `capture_margin = max(horizon_epsilon, κ (r_ph,pro − r_+))` (`TraceParams::capture_margin`; CPU reference:
+   `horizon_epsilon = 1e-3`, `κ = 0`; GPU since WP-12: `κ = ½`);
 5. accepted + rejected steps `≥ max_steps` (10⁵ on the CPU) → `MaxSteps`.
 
 Rule 4 relies on exterior photons never turning around below the prograde photon orbit, which lies above
-`r_+ + 10⁻³` for every allowed spin (`r_ph,pro − r_+ ≈ 0.0074` at `a = 0.999`, `0.011` at `a = 0.998`). For a camera inside the horizon,
+`r_+ + 10⁻³` for every allowed spin (`r_ph,pro − r_+ ≈ 0.0074` at `a = 0.999`, `0.011` at `a = 0.998`).
+
+**Why any `κ < 1` is safe (WP-12).** An inward-moving photon turns back only at a *periapsis*: a zero of the
+radial potential `R(r) = (r² + a² − aξ)² − Δ (η + (ξ − a)²)` (E = 1, Bardeen 1973) with `R < 0` just below and
+`R > 0` just above. Spherical photon orbits are double roots of `R` and fill `[r_ph,pro, r_ph,retro]` (Teo 2003).
+A periapsis tends to the spherical orbit with the same `(ξ, η)` as those constants become critical, so the lowest
+possible periapsis is `r_ph,pro`. Close to the horizon `R(r_+) = (r_+² + a² − aξ)² ≥ 0`. The delicate case is
+`ξ ≈ 2r_+/a`, where `R(r_+) ≈ 0` and `R′(r_+) < 0`: there `R` dips negative just outside the horizon. Photons in
+the thin allowed band below the dip come out of the past horizon and fall back into the future horizon, so they
+never reach an exterior camera, and the next root above is a periapsis outside the photon region again. Nothing
+an exterior camera sees turns around in `(r_+, r_ph,pro)`.
+
+This was checked numerically. A numpy root search over 1.3·10⁶ constants (ξ ∈ [−12, 12] plus a fine band
+around `2r_+/a`, η ≤ 60 including the vortical range `η ≥ −(a − |ξ|)²` for `|ξ| < a`) gave these lowest
+periapses:
+
+| a | r₊ | r_ph,pro | lowest periapsis |
+|---|---|---|---|
+| 0.5 | 1.86603 | 2.34730 | 2.34975 |
+| 0.9 | 1.43589 | 1.55785 | 1.55903 |
+| 0.99 | 1.14107 | 1.16764 | 1.17553 |
+| 0.999 | 1.04471 | 1.05208 | 1.05237 |
+
+The unit test `photon_periapsis_never_below_prograde_photon_orbit` repeats the check by sign-change detection.
+It covers the grid for a ∈ {0, 0.5, 0.9, 0.99, 0.998, 0.999}, and a positive control finds periapses just above
+`r_ph,pro`.
+
+A ray inside `r_+ + κ (r_ph,pro − r_+)` moving inward is therefore captured. Stopping it there instead of
+following it toward the past horizon, where `|p|` diverges and steps shrink, saves most of the cost of shadow
+pixels. With `κ = ½` the margin is half the distance to the lowest periapsis (0.0037 at `a = 0.999`, 0.5 at
+`a = 0`). For a camera inside the horizon,
 past-directed rays have `r` increasing in the region between the horizons. They cross the future horizon
 outward, which ingoing KS covers regularly, so rule 4 does not fire on the way out.
 
@@ -588,7 +620,9 @@ clamped. Display: `encode_sRGB(tonemap(s · rgb))`.
 
 - Auto exposure: `s = 2^EV · 0.18 / L̄`, with `L̄ = exp(mean ln Y)` over pixels with `Y > 0`. Black pixels are
   excluded so that the shadow's size does not change the exposure. The sum runs sequentially, which keeps it
-  deterministic.
+  deterministic. The viewer computes the same `L̄` on the GPU (`stats.wgsl`, WP-12): f32 sums of `ln Y` per
+  256-pixel workgroup, combined in f64 on the CPU. It agrees with the CPU value to ≈ 3e-7 relative (test
+  `gpu_stats_match_cpu_readbacks`). Headless renders still use the CPU path.
 - Manual exposure: `s = 2^EV / Y_ref`, where `Y_ref` is the luminance of a 5772 K blackbody with `w = 1`, `g = 1`.
 - ACES fitted (S. Hill): `M_out · RRT_ODT(M_in · rgb)` with the rational fit
   `(v(v + 0.0245786) − 0.000090537) / (v(0.983729 v + 0.4329510) + 0.238081)`.
@@ -649,6 +683,28 @@ Apple M2 Pro (Metal):
 So f32 precision, not the GPU port, dominates the error budget. Both are well inside PRD §9 test 15
 (≥ 99.5% status, 1e-3 rad for ≥ 99% of rays).
 
+### GPU right-hand side in vector form
+
+`geodesic.wgsl::ks_hamiltonian_rhs` (WP-12) computes the same `dp_μ/dλ = ½ ∂_μ f (l·p)² + f (l·p) (∂_μ l^ν) p_ν`
+as the Rust code. The Rust code builds the matrix `∂_j l_i` and contracts it with `p`; the WGSL contracts
+analytically. From `l_x = (r x + a y)/q`, `l_y = (r y − a x)/q`, `l_z = z/r` (`q = r² + a²`) and the product
+rule,
+
+    ∂_j l_x = (x ∂_j r + r δ_jx + a δ_jy − 2 r l_x ∂_j r) / q,
+    ∂_j l_y = (y ∂_j r + r δ_jy − a δ_jx − 2 r l_y ∂_j r) / q,
+    ∂_j l_z = δ_jz / r − z ∂_j r / r²,
+
+so that
+
+    (∂_j l_i) p_i = s ∂_j r + [(r p_x − a p_y, a p_x + r p_y, 0)/q]_j + δ_jz p_z / r,
+    s = (x p_x + y p_y − 2 r (l_x p_x + l_y p_y)) / q − z p_z / r².
+
+Every quantity is a scalar or `vec3`. The earlier port kept the Rust structure: a `var` struct with an
+`array<vec4, 4>`, plus loops writing dynamically indexed vector components. naga lowers that to thread-local
+memory on Metal, which made the trace 9.3× slower (755 → 81 ms for a 1920×1080 sample, M2 Pro). The rewrite is
+checked by the existing GPU-vs-CPU RHS and DOPRI5 test-ray comparisons and by PRD test 15, which was unchanged
+by it.
+
 ### GPU tracer tolerances
 
 `TraceParams::gpu_default()` (WP-08): DOPRI5, `rtol = 1e-5`, `atol = 1e-7`, `h_min = 1e-6`, at most 2000 steps,
@@ -665,6 +721,37 @@ momentum blow-up factor `10⁴`. The escape radius, step caps and horizon criter
 - **Tolerance makes no difference.** `rtol = 1e-4` gives the same agreement and only 3% fewer steps (98 vs 101 per
   ray). Away from the critical curve the step count is set by the step caps (`far_step_factor = 0.1`), and the
   error is set by f32. WP-12 should tune the caps rather than `rtol`.
+
+**WP-12 retuning (speed).** With the cheaper RHS, the cost of a sample is proportional to the mean step count
+(≈ 0.63 ns per ray-step at 960×540 on an M2 Pro). The `gravography bench --parity` sweeps (speed and PRD test 15
+together) showed:
+
+- **The far-field cap set the step count.** `far_step_factor = 0.1` bound before the error control did, so
+  `rtol` had no effect at all from 1e-5 to 3e-4. Relaxing the cap alone hands control to DOPRI5 at `rtol = 1e-5`,
+  and accuracy drops (p99 9.9e-4 rad at cap 0.3). The chosen pair is cap 0.5 with `rtol = 2e-6`
+  (`atol = 2e-8`).
+- **Escape radius `max(4 r_cam, 100)`** instead of `max(16 r_cam, 400)`: 6–10% fewer steps, and the parity
+  directions are unchanged (p99 2.9e-5 → 4.5e-5 rad at the WP-08 caps).
+- **Captured rays dominated Kerr scenes.** The shadow pixels cost about 2× the sky (steps heat map). They now stop
+  at the spin-scaled capture margin (`κ = ½`, see "Termination and classification"). The momentum blow-up factor
+  is `10³` (escaping rays peak at `|p|/|p₀| ≤ 12`, an 80× margin). Neither changed a single status in test 15.
+- **Unchanged:** the error norm keeps `x^t`. Excluding it made no difference.
+
+| Defaults | rtol | far cap | escape | blow-up | κ | mean steps (test 15) | Kerr edge-on 960×540 |
+|---|---|---|---|---|---|---|---|
+| WP-08 | 1e-5 | 0.1 | 16 r, 400 | 10⁴ | 0 | 100 | 38 ms |
+| WP-12 | 2e-6 | 0.5 | 4 r, 100 | 10³ | ½ | 42 | 13.6 ms (1024² tiles) |
+
+Test 15 with the WP-12 defaults, 128² per camera:
+
+| Check | Result | PRD threshold |
+|---|---|---|
+| Status agreement | 99.999% (2 differ, both next to the critical curve) | ≥ 99.5% |
+| Escaped rays within 1e-3 rad | 99.78% | ≥ 99% |
+| Angle, p50 / p99 | 4.0e-6 / 1.9e-4 rad | — |
+
+A 1080p pixel at 60° is 9.7e-4 rad, so p99 is 0.2 px. Test 16 (images) is unchanged: flux within 0.4%, and at
+most 3.4% of pixels more than 8 levels off, all from the footprint method.
 
 **Test 15** (WP-08, Apple M2 Pro). The 10 parity cameras, 128 × 128 pixels each over a 90° field
 (163 840 rays), GPU per-pixel tracer vs CPU f64 reference (`rtol = 1e-10`):

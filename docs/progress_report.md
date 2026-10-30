@@ -6,7 +6,7 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
 
 ## Current state
 
-- WP-00 to WP-11 done.
+- WP-00 to WP-12 done.
   - `gravography-physics`: Kerr–Schild metric and derivatives, Hamiltonian ray tracing (DOPRI5/RK4, termination,
     escape direction, `g = 1/p_t`), BL ↔ KS, radii, invariants, observer dynamics, tetrad boosts (WP-06).
   - `gravography-sky`: CIE 1931 table, Planck spectra, blackbody LUT, XYZ → sRGB, deterministic star catalogue,
@@ -15,24 +15,36 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
     ray-differential footprints, cube-map shading, effect toggles), auto/manual exposure, ACES/Reinhard tone mapping,
     PNG/EXR output. `ObserverSpec::{place, place_boosted}` (WP-11) build an observer from a preset spec.
   - `gravography-render::gpu` (WP-07–09): headless/surface wgpu device, WGSL assembly, DOPRI5 per-pixel trace pass,
-    shading, accumulation, tone mapping, debug views, present pass (WP-10).
+    shading, accumulation, tone mapping, debug views, present pass (WP-10). WP-12 added:
+    - a fused vector-form RHS (9× faster);
+    - retuned GPU defaults and 1024² tiles;
+    - `GpuTimer` (GPU busy time) and `GpuStats` (log-average luminance and ray-status counts on the GPU, read back
+      asynchronously).
   - `gravography-render::parity` (WP-07): GPU ↔ CPU parity harness.
   - `gravography` binary: `gravography render --scene … --out …png|exr [--width --height --samples
-    --backend cpu|gpu --debug status|shift|steps --no-cache]`. With no subcommand, `gravography` opens the
-    **interactive viewer** (WP-10/11):
+    --backend cpu|gpu --debug status|shift|steps --no-cache]`; `gravography bench` (WP-12: GPU time per sample at
+    several scales, static convergence, `--parity` for PRD test 15 with the same settings). With no subcommand,
+    `gravography` opens the **interactive viewer** (WP-10/11/12):
     - free flight with WASD/RF thrust relative to the view, mouse-drag look, Space to cut thrust;
     - presets (hover, ZAMO, circular orbit, radial infall) with validity checks;
     - time warp, pause and single step;
     - a HUD (FR-O4), a live spin slider and effect toggles;
-    - progressive refinement whenever the view is still, P for screenshots, and `--smoke-test` for scripted checks,
-      including a fall through the horizon.
+    - dynamic resolution while moving (≥ 960×540 pixels, 60 fps target);
+    - full-resolution progressive refinement when still;
+    - debounced resizes;
+    - P for screenshots, and `--smoke-test` for scripted checks (including a fall through the horizon and captures
+      of the composed window).
 - PRD §9 tests 1–16 pass, as do FR-X3 (scene round trip) and a renderer lensing validation.
-- **Next work package:** WP-12 — Performance (GPU timing, dynamic resolution, progressive refinement, integrator
-  tuning, optional Schwarzschild fast path; measure NF-1).
+- **NF-1 met** on an Apple M2 Pro at 1080p (WP-12 entry):
+  - moving at scale 0.5: 70–190 fps on every example scene;
+  - still, full resolution, 16 samples: 0.3–0.9 s.
+- **Next work package:** WP-13 — v1 polish & release (bookmarks, camera paths, projection modes, false-colour
+  bands, texture sky, README, `THIRD_PARTY.md`).
 - Toolchain: rustup, Rust **1.99.1** (`rust-toolchain.toml`).
 - The user approved shipping the CC BY-SA 4.0 CIE table (2026-10-30; see `THIRD_PARTY.md`).
-- The user confirmed (2026-10-30) that the WP-10 viewer window opens and resizes correctly, but that **going full
-  screen is laggy**. The cause is analysed under WP-11 "Known issues"; the fix belongs to WP-12.
+- The user confirmed (2026-10-30) that the WP-10 viewer window opens and resizes correctly, but that going full
+  screen was laggy. WP-12 addressed this: the renderer is about 24× faster, resizes are debounced, and the blocking
+  readbacks are gone. **User:** please check full screen again.
 - Open questions for the user:
   - The example scenes use auto exposure with −2 EV (−4 EV inside the horizon), chosen by eye. Adjust to taste.
   - Please try the WP-11 manual checklist items marked **user** (keyboard focus, the feel of the controls) and the
@@ -57,7 +69,7 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
 | WP-09 | GPU shading & headless GPU render | done | `wp-09` |
 | WP-10 | Viewer shell | done | `wp-10` |
 | WP-11 | Interactive flight | done | `wp-11` |
-| WP-12 | Performance | not started | |
+| WP-12 | Performance | done | `wp-12` |
 | WP-13 | v1 polish & release | not started | |
 
 ---
@@ -93,6 +105,166 @@ Template for each entry (copy above the previous entry):
 **Notes for the next agent**
 -
 -->
+
+## WP-12 — Performance — 2026-10-30 — COMPLETE
+
+**Summary**
+- **Measurement first:** `gravography bench` (`crates/gravography-app/src/bench.rs`).
+  - It renders single progressive samples (exactly the viewer's per-frame work) at several scales and waits for
+    each; it also times the trace alone and a static convergence.
+  - `--parity` runs PRD test 15 with the same integrator settings. Every GPU integrator parameter can be
+    overridden from the command line, and `--steps-map` writes step heat maps.
+  - Baseline at 1080p: 755 ms per sample at scale 1 and 190 ms at scale 0.5 (Schwarzschild). The trace pass was
+    100% of it. This was the lag the user saw while flying.
+- **9.3× faster trace from a shader change.** `ks_hamiltonian_rhs` (WGSL) is now in fused vector form
+  (`docs/physics.md` § "GPU right-hand side in vector form"): same maths, no arrays or dynamically indexed
+  vectors. naga had lowered those to thread-local memory on Metal. PRD test 15 was unchanged.
+- **Integrator retuning (≈ 2.5× fewer steps):** found with `bench --parity` sweeps.
+  - The far-field step cap was binding (`rtol` had no effect at all): it is now 0.5, with `rtol = 2e-6`.
+  - Escape radius `max(4 r_cam, 100)`.
+  - Captured rays stop at a spin-scaled margin `r_+ + ½ (r_ph,pro − r_+)`. This is a new
+    `TraceParams::capture_photon_fraction`, justified by the photon periapsis bound, documented and tested.
+  - Momentum blow-up `10³`.
+  - 1024² dispatch tiles (≈ 10% faster than 256²).
+  - The CPU reference is unchanged (κ = 0).
+- **GPU timing:** `gpu::GpuTimer` measures the GPU busy time per sample:
+  `done(N) − max(submitted(N), done(N−1))`, from `Queue::on_submitted_work_done`, polled without blocking and
+  tagged with the render scale.
+- **Dynamic resolution (FR-R3):** `state::DynamicResolution`, a damped, quantised controller using `t ∝ s²`.
+  - It aims at 80% of the frame budget for the target fps (default 60).
+  - Floor: at least 960×540 internal pixels (`min_moving_scale`). That is the PRD's "1080p at 0.5" as a pixel
+    count, so the floor means the same on Retina windows.
+  - The camera counts as moving for 120 ms after its last change. The render-scale setting is now the **still**
+    scale (default 1.0): a still camera switches to it and accumulates (progressive refinement).
+- **Resize debounce** (the user's full-screen lag): the surface is reconfigured at once, but the internal
+  resolution follows only once the size has been stable for 150 ms. Meanwhile the old image is stretched.
+- **No blocking readbacks in the frame loop:** `gpu::GpuStats` (`stats.wgsl`) computes the log-average luminance
+  (per-workgroup f32 partial sums of `ln Y`) and the ray-status counts (workgroup atomics) on the GPU. It reads
+  back ≈ 8 bytes per 256 pixels asynchronously.
+  - It replaces the HDR-image and G-buffer copies that caused a hitch once a second while moving.
+  - Metering interval while moving: 0.25 s.
+  - Screenshots wait for statistics if none have arrived, so they never use an unmetered exposure.
+  - **Bug found and fixed in this WP:** the metering at convergence could be refused (both readback slots busy
+    with requests from the motion) and was never retried, because no further samples are rendered after
+    convergence. A still view then kept the exposure and ray rates of the motion: the smoke test showed 81%
+    "escaped" inside the horizon, against 4% correct. `state::Metering` now keeps a metering due until a request
+    is accepted (test `a_refused_metering_at_convergence_is_retried`), and the smoke stages wait for it.
+- **Viewer UI:** still scale, a dynamic-resolution checkbox, target fps, and the GPU ms in the HUD.
+
+**Key files/modules**
+- `crates/gravography-render/src/gpu/shaders/geodesic.wgsl`: vector-form RHS.
+- `crates/gravography-physics/src/ray.rs`:
+  - `TraceParams::capture_photon_fraction` and `capture_margin`;
+  - the new GPU constants (`GPU_RTOL`, `GPU_FAR_STEP_FACTOR`, `GPU_ESCAPE_*`, `GPU_CAPTURE_PHOTON_FRACTION`,
+    `GPU_MOMENTUM_BLOWUP`);
+  - the periapsis test.
+- `crates/gravography-render/src/gpu/timer.rs`: `GpuTimer`, `busy_ms`.
+- `crates/gravography-render/src/gpu/stats.rs` and `shaders/stats.wgsl`: `GpuStats`, `FrameStats`, `combine`.
+- `crates/gravography-render/src/gpu/tracer.rs`: `DEFAULT_TILE = 1024`.
+- `crates/gravography-app/src/viewer/state.rs`: `DynamicResolution`, `Metering`, `min_moving_scale`, `gpu_budget_ms`,
+  `MOVE_HOLD`, `RESIZE_SETTLE`, `METER_INTERVAL` (0.25 s).
+- `crates/gravography-app/src/viewer/mod.rs`: frame loop (timing → controller → resize → restart), async stats,
+  debounced resize.
+- `crates/gravography-app/src/bench.rs`: the benchmark.
+
+**Decisions & deviations**
+- **The WGSL RHS no longer mirrors the Rust code line by line** (CLAUDE.md §5 asks for the same structure). That
+  structure was the 9× bottleneck. The function keeps its name, the maths is identical, the derivation is in
+  `physics.md`, and the GPU-vs-CPU RHS, DOPRI5 test-ray and test 15 comparisons cover it.
+- **GPU-only classification change:** captured rays stop at the spin-scaled margin, which the CPU reference does
+  not use (κ = 0 there). This is sound by the periapsis bound, and the status agreement with the reference in
+  test 15 is 99.999%.
+- **Timestamp queries were not used.** The adapter reports `TIMESTAMP_QUERY`. With pass `timestamp_writes`
+  (wgpu 30 / Metal), however:
+  - the shade pass's end-of-pass timestamp read back as 0;
+  - with a begin write added, the shade pass's values were stale from the second frame on (identical to the
+    first), while the trace pass's begin timestamp updated.
+
+  The PRD's fallback ("else CPU frame timing") is used instead: queue-completion busy time. The first version
+  (plain submission → completion) read 33 ms at 115 fps, because the CPU ran ahead and queueing was counted. The
+  busy-time formula fixes that.
+- **The render-scale meaning changed:** it is now the still scale (default 1.0, was 0.5). While moving the
+  controller decides, with a floor of 960×540 pixels instead of a fixed 0.5. On a 2560×1440 Retina window the
+  floor is scale 0.375.
+- **Schwarzschild fast path (optional in the PRD): deferred.** NF-1 is met without it on the hardest (Kerr)
+  example scene, and a second tracer would need its own parity test. If wanted, it fits as a per-frame 1D LUT in
+  the trace pass (see the PRD WP-12 text).
+- **Changed test:** `gpu_timer_measures_a_sample` first asserted that 16× the pixels takes > 2× the time. It
+  failed once in about 20 runs, because parallel GPU tests share the device. That violates CLAUDE.md §4
+  (determinism), so the scaling is now printed, not asserted. It was my own new test, before merging.
+  `accumulation_progresses_and_meters` and the view-settings tests were extended for the new fields.
+- **No new dependencies.** PRD unchanged.
+
+**Tests**
+- `cargo test --workspace`: **242 passed, 3 ignored** (was 231). Ignored tests (release) pass:
+  `test15_full_resolution`, `test16_larger`, `default_sky_bake_conserves_flux`.
+- **New tests:**
+  - `photon_periapsis_never_below_prograde_photon_orbit` (with a positive control) and
+    `capture_margin_scales_with_the_photon_orbit`;
+  - `gpu_timer_measures_a_sample`, `busy_time_excludes_queueing`;
+  - `gpu_stats_match_cpu_readbacks` (log-average to 3e-7 relative, exact status counts, partial workgroups),
+    `partials_combine_like_the_cpu_log_average`;
+  - `dynamic_resolution_converges_to_the_budget` (from above and below, no oscillation),
+    `dynamic_resolution_respects_limits_and_ignores_garbage`, `moving_floor_and_budget`;
+  - `summary_statistics` (bench);
+  - `a_refused_metering_at_convergence_is_retried`.
+- **Test 15 with the new defaults (128²/camera):**
+  - status 99.999% (2 differ, next to the critical curve);
+  - 99.78% of directions within 1e-3 rad;
+  - p99 1.9e-4 rad (0.2 px at 1080p/60°);
+  - mean steps 42 (was 100).
+- **Test 16:** flux within 0.4%, and ≤ 3.4% of pixels > 8 levels (as before, footprint method).
+
+**Visual checks**
+- **Smoke test window captures:** panel, HUD and image are correct at hover and inside the horizon. The HUD shows
+  GPU ms and the active scale.
+- **Steps heat map** (`bench --steps-map`) of Kerr edge-on: before the retuning the shadow (captured rays) cost
+  about 2× the sky. This motivated the capture-margin change.
+
+**Performance** (Apple M2 Pro, macOS, 1920×1080 output, `gravography bench`, ms per sample = trace + shade;
+measured with nothing else on the GPU)
+
+| Scene | Before WP-12, scale 0.5 | Scale 1.0 | Scale 0.75 | Scale 0.5 | Static 16 spp at 1080p (before) |
+|---|---|---|---|---|---|
+| schwarzschild_far | 190 ms | 29.6 ms | 17.0 ms | 7.9 ms (127 fps) | 0.49 s (12.1 s) |
+| kerr_edge_on (a = 0.99) | 337 ms | 52.7 ms | 29.8 ms | 14.0 ms (72 fps) | 0.85 s (20.6 s) |
+| inside_horizon | 194 ms | 35.8 ms | 32.5 ms* | 9.5 ms (105 fps) | 0.56 s (12.5 s) |
+| fast_observer | 149 ms | 19.5 ms | 11.3 ms | 5.3 ms (188 fps) | 0.31 s (9.5 s) |
+
+\* noisy p95 in that run.
+
+- **NF-1:** 60 fps at 1080p with internal scale ≥ 0.5 while moving: **met** on all scenes, worst case 14 ms. A
+  converged full-resolution image in ~1 s when still: **met**, 0.3–0.9 s.
+- **Viewer smoke test** (window 1920×1152 physical, 120 Hz display): falling through the horizon, 75–79 fps. The
+  controller climbed from the floor toward the 13.3 ms budget during the 2.5 s fall.
+- **Caveat:** a later bench run was disturbed by a viewer instance the user was running (about 2× slower, noisy),
+  so those numbers were discarded.
+- **2560×1440 (Retina) was not measured cleanly:** the user's viewer stayed open for the rest of the session.
+  Cost scales with pixel count, since the per-ray cost does not depend on resolution, so the moving floor
+  (960×540) performs like the 1080p scale-0.5 row. A full-resolution still image at 2560×1440 has 1.78× the
+  pixels of 1080p: about 1.5 s to 16 samples for Kerr edge-on. **Next agent:** re-run
+  `bench --width 2560 --height 1440 --scales 1,0.5,0.375` with no viewer open and record the result.
+
+**Known issues / tech debt**
+- **Per-frame allocations remain:** uniform buffers and bind groups in `render_sample`, `Presenter::draw` and
+  `GpuStats::request`. They are not significant now (the trace dominates), but could be made persistent.
+- **Convergence on large windows:** a Retina window at full resolution is 3.7 M pixels. For Kerr edge-on, still
+  convergence (16 samples) is estimated at about 1.5 s, slightly over the ~1 s goal, which NF-1 states for 1080p.
+  Lower the still scale or the sample target if that matters.
+- **Timer approximation:** the busy time can include the present/egui work of the previous frame if it overlaps.
+  The controller is damped, so this is harmless.
+- **Smoke-test convergence while the camera is about to switch scale:** the smoke stages may converge at the
+  moving scale within the 120 ms hold (cosmetic, smoke only).
+- **Schwarzschild fast path:** not implemented (see Decisions).
+
+**Notes for the next agent (WP-13)**
+- **Bookmarks (FR-O6)** need `Flight` serialisation: `Observer` (`pos`, `tetrad`, `tau`, `motion`; `h_next` is
+  private, so reset it on load), `LookSpec`, `FlightSettings`, the preset, the spin and `ViewSettings`.
+- **Projection modes (FR-R2):** `Projection` has only `Rectilinear`. Equirectangular needs WGSL
+  `projection_direction` and CPU support. The mouse sensitivity (`input::degrees_per_pixel`) assumes rectilinear.
+- **Check performance after a change:** `cargo run --release -p gravography-app -- bench --scene … --parity`.
+  Close any running viewer first, since it shares the GPU.
+- **Fonts:** `epaint_default_fonts` (enabled in the WP-11 follow-up) must be listed in `THIRD_PARTY.md`.
 
 ## WP-11 follow-up — Viewer UI fixes — 2026-10-30 — COMPLETE
 
