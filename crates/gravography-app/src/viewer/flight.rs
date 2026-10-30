@@ -31,7 +31,7 @@ pub const THRUST_RANGE: (f64, f64) = (1e-5, 1.0);
 pub const VIEWER_R_MAX: f64 = 200.0;
 
 /// User-adjustable flight settings.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FlightSettings {
     /// Proper time per wall-clock second, `M/s`.
     pub time_warp: f64,
@@ -312,6 +312,22 @@ impl Flight {
 
     /// Advances the simulation by one frame of `dt_wall` seconds with the held thrust keys.
     pub fn update(&mut self, dt_wall: f64, keys: &ThrustKeys) -> FrameUpdate {
+        let mut never = f64::INFINITY;
+        self.update_marked(dt_wall, keys, &mut never, 0.0, |_| {})
+    }
+
+    /// [`Flight::update`], but the integration stops exactly at the proper times `next_mark`, `next_mark +
+    /// interval`, … that fall inside this frame, and calls `at_mark` with the state there (camera-path recording
+    /// at fixed proper-time intervals, FR-O7). `next_mark` is advanced past the marks handled. A reset (error) ends
+    /// the frame without further marks.
+    pub fn update_marked(
+        &mut self,
+        dt_wall: f64,
+        keys: &ThrustKeys,
+        next_mark: &mut f64,
+        interval: f64,
+        mut at_mark: impl FnMut(&Flight),
+    ) -> FrameUpdate {
         let dt = if dt_wall > 0.0 {
             dt_wall.min(MAX_FRAME_DT)
         } else {
@@ -333,10 +349,40 @@ impl Flight {
         }
         let thrust = self.thrust_body(keys);
         out.advanced = true;
-        if let Err(e) = self.observer.advance(&self.kerr, dtau, &thrust, &self.params) {
+        let end = self.observer.tau + dtau;
+        while interval > 0.0 && *next_mark <= end {
+            let step = *next_mark - self.observer.tau;
+            if let Err(e) = self.observer.advance(&self.kerr, step, &thrust, &self.params) {
+                out.message = Some(self.reset(&e.to_string()));
+                return out;
+            }
+            // Land exactly on the mark (advance stops at τ + step up to round-off).
+            self.observer.tau = *next_mark;
+            at_mark(self);
+            *next_mark += interval;
+        }
+        let rest = end - self.observer.tau;
+        if let Err(e) = self.observer.advance(&self.kerr, rest, &thrust, &self.params) {
             out.message = Some(self.reset(&e.to_string()));
         }
         out
+    }
+
+    /// Replaces the whole state (bookmarks): spacetime, observer, look, preset and settings.
+    pub fn restore(
+        &mut self,
+        kerr: Kerr<f64>,
+        observer: Observer<f64>,
+        look: LookSpec,
+        preset: ObserverSpec,
+        settings: FlightSettings,
+    ) {
+        self.kerr = kerr;
+        self.observer = observer;
+        self.look = look;
+        self.preset = preset;
+        self.settings = settings.clamped();
+        self.step_pending = false;
     }
 
     /// Applies a preset from the panel (boost and look of `spec` are ignored; the look rotation is reset). Returns
@@ -846,6 +892,31 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn marked_updates_stop_exactly_on_the_marks() {
+        // Free fall from r = 30 at 10 M/s; marks every 0.25 M from τ = 0.25. Frames of 1/60 s (Δτ ≈ 0.167), a
+        // stalled 0.1 s frame (Δτ = 1) and 1/50 s: total τ ≈ 1.533, so six marks, none at a frame boundary. The
+        // marks are hit exactly and the end state equals an unmarked integration of the same total proper time
+        // (DOPRI5 rtol 1e-10: positions agree to ~1e-9).
+        let mut a = flight(0.0, &safe_preset());
+        a.cut_thrust();
+        a.settings.time_warp = 10.0;
+        let mut b = a.clone();
+        let (mut next, mut taus) = (0.25, Vec::new());
+        for dt in [1.0 / 60.0, 1.0 / 60.0, 0.1, 1.0 / 50.0] {
+            a.update_marked(dt, &ThrustKeys::default(), &mut next, 0.25, |f| {
+                taus.push(f.observer.tau)
+            });
+            b.update(dt, &ThrustKeys::default());
+        }
+        assert_eq!(taus, vec![0.25, 0.5, 0.75, 1.0, 1.25, 1.5]);
+        assert_relative_eq!(a.observer.tau, b.observer.tau, max_relative = 1e-12);
+        for k in 1..4 {
+            assert_relative_eq!(a.observer.pos[k], b.observer.pos[k], epsilon = 1e-8);
+        }
+        assert!(next > a.observer.tau);
     }
 
     #[test]

@@ -24,6 +24,8 @@ egui-winit = "0.37.0"
 winit = "0.30.13"
 wgpu = "30.0.1"
 pollster = "1.0.1"
+serde = { version = "1.0.229", features = ["derive"] }
+ron = "0.12.3"
 
 [lints]
 workspace = true

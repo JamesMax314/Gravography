@@ -7,3 +7,7 @@ proptest-regressions/
 
 # Viewer screenshots (FR-X1)
 /screenshots/
+
+# Viewer bookmarks and camera paths (FR-O6, FR-O7)
+/bookmarks/
+/paths/

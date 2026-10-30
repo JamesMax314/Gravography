@@ -57,6 +57,41 @@ pub struct Actions {
     pub step: bool,
     /// Reset the look rotation.
     pub reset_look: bool,
+    /// Save a bookmark under [`PersistPanel::name`].
+    pub save_bookmark: bool,
+    /// Load the bookmark with this index in [`PersistPanel::bookmarks`].
+    pub load_bookmark: Option<usize>,
+    /// Start recording a camera path.
+    pub start_recording: bool,
+    /// Stop recording and save the path under [`PersistPanel::name`].
+    pub stop_recording: bool,
+    /// Play the path with this index in [`PersistPanel::paths`].
+    pub play_path: Option<usize>,
+    /// Stop playback.
+    pub stop_playback: bool,
+    /// Re-read the bookmark and path directories.
+    pub refresh_files: bool,
+}
+
+/// Bookmarks and camera paths panel state.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PersistPanel {
+    /// Name for the next bookmark or path file.
+    pub name: String,
+    /// Bookmark files (names) in the bookmark directory.
+    pub bookmarks: Vec<String>,
+    /// Path files (names) in the path directory.
+    pub paths: Vec<String>,
+    /// Proper time between recorded samples, `M`.
+    pub interval: f64,
+    /// Playback rate, `M` of proper time per second.
+    pub speed: f64,
+    /// Loop playback.
+    pub looping: bool,
+    /// Samples recorded so far, while recording.
+    pub recording: Option<usize>,
+    /// Current and total samples, while playing.
+    pub playing: Option<(usize, usize)>,
 }
 
 /// Draws the left panel, editing `settings` and `flight` in place. `check` is the validity of `flight.editor`.
@@ -64,6 +99,7 @@ pub fn settings_panel(
     ui: &mut egui::Ui,
     settings: &mut ViewSettings,
     flight: &mut FlightPanel,
+    persist: &mut PersistPanel,
     check: &PresetCheck,
     status: &Status,
 ) -> Actions {
@@ -93,6 +129,7 @@ pub fn settings_panel(
             ui.checkbox(&mut settings.effects.beaming, "intensity beaming");
         });
         render_section(ui, settings, &mut actions);
+        persist_section(ui, persist, &mut actions);
         ui.separator();
         ui.collapsing("Keys", |ui| {
             for line in [
@@ -256,6 +293,69 @@ fn render_section(ui: &mut egui::Ui, settings: &mut ViewSettings, actions: &mut 
             });
         if ui.button("Screenshot (P)").clicked() {
             actions.screenshot = true;
+        }
+    });
+}
+
+fn persist_section(ui: &mut egui::Ui, p: &mut PersistPanel, actions: &mut Actions) {
+    ui.collapsing("Bookmarks & camera paths", |ui| {
+        ui.horizontal(|ui| {
+            ui.label("name");
+            ui.text_edit_singleline(&mut p.name);
+        });
+        if ui.button("Save bookmark").clicked() {
+            actions.save_bookmark = true;
+        }
+        for (i, b) in p.bookmarks.iter().enumerate() {
+            if ui.button(format!("load {b}")).clicked() {
+                actions.load_bookmark = Some(i);
+            }
+        }
+        ui.separator();
+        ui.add(
+            egui::Slider::new(&mut p.interval, 0.05..=20.0)
+                .logarithmic(true)
+                .text("record every (M)"),
+        );
+        match p.recording {
+            Some(n) => {
+                ui.label(format!("recording: {n} samples"));
+                if ui.button("Stop & save path").clicked() {
+                    actions.stop_recording = true;
+                }
+            }
+            None => {
+                if ui
+                    .add_enabled(p.playing.is_none(), egui::Button::new("Record path"))
+                    .clicked()
+                {
+                    actions.start_recording = true;
+                }
+            }
+        }
+        ui.add(
+            egui::Slider::new(&mut p.speed, 0.01..=1000.0)
+                .logarithmic(true)
+                .text("playback (M/s)"),
+        );
+        ui.checkbox(&mut p.looping, "loop");
+        if let Some((k, n)) = p.playing {
+            ui.label(format!("playing sample {}/{n}", k + 1));
+            if ui.button("Stop playback").clicked() {
+                actions.stop_playback = true;
+            }
+        } else {
+            for (i, name) in p.paths.iter().enumerate() {
+                if ui
+                    .add_enabled(p.recording.is_none(), egui::Button::new(format!("play {name}")))
+                    .clicked()
+                {
+                    actions.play_path = Some(i);
+                }
+            }
+        }
+        if ui.small_button("refresh lists").clicked() {
+            actions.refresh_files = true;
         }
     });
 }

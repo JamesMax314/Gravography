@@ -10,7 +10,7 @@ pub const RENDER_SCALE_RANGE: (f32, f32) = (0.25, 1.0);
 pub const MAX_SAMPLE_TARGET: u32 = 256;
 
 /// User-adjustable render settings (egui panel).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ViewSettings {
     /// Progressive sample target per pixel (accumulation stops there).
     pub samples: u32,

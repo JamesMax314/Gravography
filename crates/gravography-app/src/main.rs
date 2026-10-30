@@ -48,6 +48,15 @@ struct ViewArgs {
     /// Do not read or write the baked-sky cache.
     #[arg(long)]
     no_cache: bool,
+    /// Start from this bookmark (RON, saved from the viewer); its sky replaces the scene's.
+    #[arg(long)]
+    bookmark: Option<PathBuf>,
+    /// Directory for bookmarks.
+    #[arg(long, default_value = "bookmarks")]
+    bookmark_dir: PathBuf,
+    /// Directory for camera paths.
+    #[arg(long, default_value = "paths")]
+    path_dir: PathBuf,
 }
 
 #[derive(Subcommand)]
@@ -129,10 +138,18 @@ fn load_sky(scene: &Scene, no_cache: bool) -> Result<Sky> {
 }
 
 fn view(args: &ViewArgs) -> Result<()> {
-    let scene = match &args.scene {
+    let mut scene = match &args.scene {
         Some(p) => Scene::load(p).with_context(|| format!("loading {}", p.display()))?,
         None => Scene::default(),
     };
+    let bookmark: Option<viewer::persist::Bookmark> = match &args.bookmark {
+        Some(p) => Some(viewer::persist::load_ron(p)?),
+        None => None,
+    };
+    if let Some(b) = &bookmark {
+        // Reproduce the bookmark's star field.
+        scene.sky = b.sky;
+    }
     // Validate the camera before opening a window.
     scene.frame()?;
     let sky = load_sky(&scene, args.no_cache)?;
@@ -141,6 +158,18 @@ fn view(args: &ViewArgs) -> Result<()> {
         sky,
         screenshot_dir: args.screenshot_dir.clone(),
         smoke_test: args.smoke_test,
+        bookmark,
+        // The smoke test keeps its files next to its screenshots, out of the user's folders.
+        bookmark_dir: if args.smoke_test {
+            args.screenshot_dir.join("bookmarks")
+        } else {
+            args.bookmark_dir.clone()
+        },
+        path_dir: if args.smoke_test {
+            args.screenshot_dir.join("paths")
+        } else {
+            args.path_dir.clone()
+        },
     })
 }
 

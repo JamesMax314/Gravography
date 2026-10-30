@@ -407,6 +407,46 @@ impl<T: Real> Observer<T> {
         })
     }
 
+    /// Rebuilds an observer from a saved state (bookmarks, camera paths): event, tetrad, proper time and motion.
+    /// The integrator's step-size memory starts fresh, which does not affect the state, only how the next
+    /// [`Observer::advance`] subdivides its interval.
+    ///
+    /// # Errors
+    /// [`ObserverError::InvalidState`] if a component is not finite, the tetrad is not orthonormal to `1e-9`, or
+    /// `e_(0)` is not future-directed; a limit error if the event is outside the allowed radii.
+    pub fn from_state(
+        kerr: &Kerr<T>,
+        pos: &Vec4<T>,
+        tetrad: &Tetrad<T>,
+        tau: T,
+        motion: Motion<T>,
+        params: &ObserverParams<T>,
+    ) -> Result<Self, ObserverError> {
+        let finite = pos
+            .iter()
+            .chain(tetrad.e_up.iter().flatten())
+            .all(|c| c.is_finite())
+            && tau.is_finite();
+        if !finite {
+            return Err(ObserverError::InvalidState(
+                "the saved state contains non-finite numbers",
+            ));
+        }
+        check_radius(kerr, pos, params)?;
+        if tetrad.orthonormality_error(&kerr.g_lo(pos)) > T::lit(1e-9) || tetrad.e_up[0][0] <= T::zero() {
+            return Err(ObserverError::InvalidState(
+                "the saved camera frame is not an orthonormal, future-directed tetrad for this spacetime",
+            ));
+        }
+        Ok(Self {
+            pos: *pos,
+            tetrad: *tetrad,
+            tau,
+            motion,
+            h_next: T::lit(1e-2),
+        })
+    }
+
     fn at(
         kerr: &Kerr<T>,
         pos: Vec4<T>,
@@ -1150,5 +1190,29 @@ mod tests {
         let o = infall_velocity(&k, &pos);
         let back = renormalise_time_component(&k.g_lo(&pos), &o).unwrap();
         assert_relative_eq!(back[0], o[0], max_relative = 1e-12);
+    }
+
+    #[test]
+    fn from_state_restores_exactly_and_validates() {
+        let kerr = Kerr::new(0.7).unwrap();
+        let params = ObserverParams::default();
+        let mut obs = Observer::circular_orbit(&kerr, 9.0, true, 0.3, &params).unwrap();
+        obs.advance(&kerr, 5.0, &[0.0; 3], &params).unwrap();
+        let back = Observer::from_state(&kerr, &obs.pos, &obs.tetrad, obs.tau, obs.motion, &params).unwrap();
+        assert_eq!(
+            (back.pos, back.tetrad, back.tau, back.motion),
+            (obs.pos, obs.tetrad, obs.tau, obs.motion)
+        );
+        // Rejected: non-finite, wrong spacetime (tetrad not orthonormal for a = 0), past-directed, out of range.
+        let mut bad = obs.pos;
+        bad[1] = f64::NAN;
+        assert!(Observer::from_state(&kerr, &bad, &obs.tetrad, 0.0, Motion::Free, &params).is_err());
+        let schw = Kerr::new(0.0).unwrap();
+        assert!(Observer::from_state(&schw, &obs.pos, &obs.tetrad, 0.0, Motion::Free, &params).is_err());
+        let mut flipped = obs.tetrad;
+        flipped.e_up[0] = flipped.e_up[0].map(|c| -c);
+        assert!(Observer::from_state(&kerr, &obs.pos, &flipped, 0.0, Motion::Free, &params).is_err());
+        let far = [0.0, 2000.0, 0.0, 0.0];
+        assert!(Observer::from_state(&kerr, &far, &obs.tetrad, 0.0, Motion::Free, &params).is_err());
     }
 }
