@@ -101,3 +101,16 @@ fn ks_field_derivatives(mass: f32, a: f32, pos: vec4<f32>) -> KsFieldDerivs {
     }
     return out;
 }
+
+// Covariant metric g_{μν} = η_{μν} + f l_μ l_ν (Rust: ks_g_lo). Symmetric, so column/row order does not matter.
+fn ks_g_lo(mass: f32, a: f32, pos: vec4<f32>) -> mat4x4<f32> {
+    let fl = ks_fields(mass, a, pos);
+    let l = fl.l_lo;
+    let eta = mat4x4<f32>(
+        vec4<f32>(-1.0, 0.0, 0.0, 0.0),
+        vec4<f32>(0.0, 1.0, 0.0, 0.0),
+        vec4<f32>(0.0, 0.0, 1.0, 0.0),
+        vec4<f32>(0.0, 0.0, 0.0, 1.0),
+    );
+    return eta + mat4x4<f32>(fl.f * l.x * l, fl.f * l.y * l, fl.f * l.z * l, fl.f * l.w * l);
+}

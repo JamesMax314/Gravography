@@ -125,6 +125,37 @@ impl<T: Real> TraceParams<T> {
     }
 }
 
+impl<T: Real> TraceParams<T> {
+    /// GPU defaults (f32; `docs/PRD.md` §5.5: rtol ~1e-5–1e-4, step budget ≲ 1000 for watchdog limits). Tuned in
+    /// WP-08 against the CPU reference (`docs/physics.md` § "GPU tracer tolerances"). The escape radius and capture
+    /// criteria are those of [`TraceParams::cpu_reference`] except the momentum blow-up factor
+    /// ([`GPU_MOMENTUM_BLOWUP`]), so classification matches.
+    pub fn gpu_default() -> Self {
+        Self {
+            rtol: T::lit(GPU_RTOL),
+            atol: T::lit(GPU_ATOL),
+            h_min: T::lit(GPU_H_MIN),
+            max_steps: GPU_MAX_STEPS,
+            momentum_blowup: T::lit(GPU_MOMENTUM_BLOWUP),
+            ..Self::cpu_reference()
+        }
+    }
+}
+
+/// Default GPU DOPRI5 relative tolerance.
+pub const GPU_RTOL: f64 = 1e-5;
+/// Default GPU DOPRI5 absolute tolerance.
+pub const GPU_ATOL: f64 = 1e-7;
+/// Default GPU smallest step (an f32 step much below `ε · |x|` no longer moves the ray).
+pub const GPU_H_MIN: f64 = 1e-6;
+/// Default GPU momentum blow-up factor. Rays approaching the past (white-hole) horizon from inside reach
+/// `|p| = 10⁸ |p₀|` only at `r − r_+ ≈ 10⁻⁸`, below the f32 resolution of `r` (ulp ≈ 2.4e-7 at r = 2). An f32 ray
+/// then steps across `r_+` and is misclassified. Escaping rays of the parity camera set peak at `|p|/|p₀| ≤ 12`, so
+/// 10⁴ keeps a ≈ 800× margin (`docs/physics.md` § "GPU tracer tolerances").
+pub const GPU_MOMENTUM_BLOWUP: f64 = 1e4;
+/// Default GPU step budget (accepted + rejected).
+pub const GPU_MAX_STEPS: u32 = 2000;
+
 /// Outcome of tracing one ray.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RayResult<T> {

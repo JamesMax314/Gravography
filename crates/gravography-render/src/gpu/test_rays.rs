@@ -37,14 +37,18 @@ pub struct GpuTraceParams {
     pub r_singular: f32,
     /// See [`TraceParams::max_steps`].
     pub max_steps: u32,
-    /// Number of rays in the batch.
+    /// Number of rays in the batch (unused by the per-pixel pass).
     pub ray_count: u32,
-    /// Padding to 16-byte multiple (WGSL uniform layout).
-    pub _pad: [u32; 3],
+    /// DOPRI5 relative tolerance.
+    pub rtol: f32,
+    /// DOPRI5 absolute tolerance.
+    pub atol: f32,
+    /// See [`TraceParams::h_min`].
+    pub h_min: f32,
 }
 
 impl GpuTraceParams {
-    /// Converts f32 tracing parameters (the integrator field is ignored: the WGSL tracer is RK4).
+    /// Converts f32 tracing parameters (the integrator is chosen by the entry point, not by this struct).
     pub fn new(kerr: &Kerr<f32>, p: &TraceParams<f32>, ray_count: u32) -> Self {
         Self {
             mass: kerr.mass(),
@@ -60,7 +64,9 @@ impl GpuTraceParams {
             r_singular: p.r_singular,
             max_steps: p.max_steps,
             ray_count,
-            _pad: [0; 3],
+            rtol: p.rtol,
+            atol: p.atol,
+            h_min: p.h_min,
         }
     }
 }
@@ -91,8 +97,8 @@ pub struct GpuRayResult {
     pub steps: u32,
     /// Affine parameter at termination.
     pub lambda: f32,
-    /// Padding.
-    pub _pad: u32,
+    /// Rejected steps (DOPRI5).
+    pub rejected: u32,
 }
 
 /// Right-hand side `(dx/dλ, dp/dλ)` evaluated on the GPU (WGSL `Phase`; 32 bytes).
@@ -111,6 +117,7 @@ pub const WORKGROUP_SIZE: u32 = 64;
 /// Compute pipelines for the test-ray entry points.
 pub struct TestRayPipeline {
     trace: wgpu::ComputePipeline,
+    dopri5: wgpu::ComputePipeline,
     rhs: wgpu::ComputePipeline,
 }
 
@@ -134,6 +141,7 @@ impl TestRayPipeline {
         };
         Self {
             trace: make("trace_rk4_main"),
+            dopri5: make("trace_dopri5_main"),
             rhs: make("eval_rhs_main"),
         }
     }
@@ -150,6 +158,20 @@ impl TestRayPipeline {
         rays: &[GpuRay],
     ) -> Result<Vec<GpuRayResult>, RenderError> {
         self.run(ctx, &self.trace, 2, kerr, params, rays)
+    }
+
+    /// Traces `rays` with adaptive DOPRI5 (`params.rtol`, `params.atol`) and returns one result per ray.
+    ///
+    /// # Errors
+    /// [`RenderError::Gpu`] on validation or readback failure.
+    pub fn trace_dopri5(
+        &self,
+        ctx: &GpuContext,
+        kerr: &Kerr<f32>,
+        params: &TraceParams<f32>,
+        rays: &[GpuRay],
+    ) -> Result<Vec<GpuRayResult>, RenderError> {
+        self.run(ctx, &self.dopri5, 2, kerr, params, rays)
     }
 
     /// Evaluates the Hamiltonian right-hand side at each `(x, p)`.
@@ -239,7 +261,7 @@ impl TestRayPipeline {
 }
 
 /// Maps a `MAP_READ` buffer, blocking until the GPU is done, and copies it out.
-fn read_buffer<T: Pod>(ctx: &GpuContext, buffer: &wgpu::Buffer) -> Result<Vec<T>, RenderError> {
+pub(crate) fn read_buffer<T: Pod>(ctx: &GpuContext, buffer: &wgpu::Buffer) -> Result<Vec<T>, RenderError> {
     let slice = buffer.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |r| {
@@ -274,6 +296,7 @@ mod tests {
         assert_eq!(size_of::<GpuTraceParams>(), 64);
         assert_eq!(offset_of!(GpuTraceParams, max_steps), 44);
         assert_eq!(offset_of!(GpuTraceParams, ray_count), 48);
+        assert_eq!(offset_of!(GpuTraceParams, h_min), 60);
         assert_eq!(size_of::<GpuRay>(), 32);
         assert_eq!(offset_of!(GpuRay, p), 16);
         assert_eq!(size_of::<GpuRayResult>(), 64);
@@ -323,6 +346,9 @@ mod tests {
                 ("r_singular", offset_of!(GpuTraceParams, r_singular)),
                 ("max_steps", offset_of!(GpuTraceParams, max_steps)),
                 ("ray_count", offset_of!(GpuTraceParams, ray_count)),
+                ("rtol", offset_of!(GpuTraceParams, rtol)),
+                ("atol", offset_of!(GpuTraceParams, atol)),
+                ("h_min", offset_of!(GpuTraceParams, h_min)),
             ],
         );
         check(
@@ -339,6 +365,7 @@ mod tests {
                 ("status", offset_of!(GpuRayResult, status)),
                 ("steps", offset_of!(GpuRayResult, steps)),
                 ("lambda", offset_of!(GpuRayResult, lambda)),
+                ("rejected", offset_of!(GpuRayResult, rejected)),
             ],
         );
         check(
