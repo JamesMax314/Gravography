@@ -511,6 +511,9 @@ impl Gfx {
         let target = GpuFrame::new(&ctx, w, h, TraceParams::<f32>::gpu_default().max_steps);
         let status = Status {
             gpu: ctx.describe(),
+            sky_note: opts.scene.sky.texture.as_ref().map(|t| {
+                format!("Texture sky {t}: APPROXIMATE colours (each pixel shown as a blackbody fitted to its colour)")
+            }),
             ..Status::default()
         };
         let mut gfx = Self {

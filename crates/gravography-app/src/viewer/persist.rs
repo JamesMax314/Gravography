@@ -142,7 +142,7 @@ impl Bookmark {
             preset: *flight.preset(),
             flight: flight.settings,
             view: *view,
-            sky: *sky,
+            sky: sky.clone(),
         }
     }
 
@@ -222,7 +222,7 @@ impl Recorder {
                 interval,
                 samples: Vec::new(),
                 view: *view,
-                sky: *sky,
+                sky: sky.clone(),
             },
             next_mark: flight.observer.tau + interval,
         };
@@ -453,7 +453,10 @@ mod tests {
         );
         assert_eq!((g.settings, *g.preset(), v2), (f.settings, *f.preset(), view));
         // A different sky is reported; a corrupt or foreign file is refused without changing the state.
-        let other = SkySpec { seed: 7, ..sky };
+        let other = SkySpec {
+            seed: 7,
+            ..sky.clone()
+        };
         assert!(loaded.apply(&mut g, &mut v2, &other).unwrap().is_some());
         let mut bad = b.clone();
         bad.version = 99;

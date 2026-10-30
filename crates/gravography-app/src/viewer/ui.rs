@@ -31,6 +31,8 @@ pub struct Status {
     pub mouse_captured: bool,
     /// GPU time of the last timed sample, milliseconds.
     pub gpu_ms: Option<f64>,
+    /// Shown under the heading, e.g. that a texture sky is approximate.
+    pub sky_note: Option<String>,
 }
 
 /// Editable copies of the flight controls.
@@ -107,6 +109,9 @@ pub fn settings_panel(
     egui::ScrollArea::vertical().show(ui, |ui| {
         ui.heading("Gravography");
         ui.label(&status.gpu);
+        if let Some(note) = &status.sky_note {
+            ui.colored_label(ui.visuals().warn_fg_color, note);
+        }
         ui.separator();
         flight_section(ui, flight, &mut actions);
         ui.small(if status.mouse_captured {

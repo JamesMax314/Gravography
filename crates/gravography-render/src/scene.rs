@@ -253,7 +253,7 @@ impl BandKind {
 }
 
 /// `[sky]`.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SkySpec {
     /// Star catalogue seed.
@@ -268,6 +268,10 @@ pub struct SkySpec {
     pub galactic_normal: [f64; 3],
     /// Observing band: `"human_vision"` (default), `"near_infrared"`, `"near_ultraviolet"` or `"soft_xray"`.
     pub band: BandKind,
+    /// Texture sky (`docs/PRD.md` §6.5, approximate): an equirectangular `.exr`/`.hdr` image used instead of the
+    /// procedural star field (path relative to the working directory).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub texture: Option<String>,
 }
 
 impl Default for SkySpec {
@@ -281,6 +285,7 @@ impl Default for SkySpec {
             diffuse_band: p.diffuse.is_some(),
             galactic_normal: p.galactic_normal,
             band: BandKind::HumanVision,
+            texture: None,
         }
     }
 }

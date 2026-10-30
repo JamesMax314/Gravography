@@ -127,6 +127,19 @@ fn main() -> Result<()> {
 fn load_sky(scene: &Scene, no_cache: bool) -> Result<Sky> {
     let t0 = Instant::now();
     let lut = BlackbodyLut::human_vision();
+    if let Some(tex) = &scene.sky.texture {
+        // Texture sky (PRD §6.5, approximate): each pixel becomes a blackbody fitted to its chromaticity.
+        let img = gravography_render::output::load_equirect(Path::new(tex))?;
+        let cube = gravography_sky::cube_from_equirect(&img, scene.sky.face_size, &lut);
+        println!(
+            "sky: texture {tex} ({}×{}) → {}² cube in {:.2} s (approximate colours: blackbody fit per pixel)",
+            img.width,
+            img.height,
+            scene.sky.face_size,
+            t0.elapsed().as_secs_f64()
+        );
+        return Ok(Sky::new(cube, scene.sky.band.lut()));
+    }
     let cache = if no_cache { None } else { cache_dir() };
     let (cube, hit) = bake_sky_cached(&scene.sky_params()?, &lut, cache.as_deref())?;
     println!(
@@ -149,7 +162,7 @@ fn view(args: &ViewArgs) -> Result<()> {
     };
     if let Some(b) = &bookmark {
         // Reproduce the bookmark's star field.
-        scene.sky = b.sky;
+        scene.sky = b.sky.clone();
     }
     // Validate the camera before opening a window.
     scene.frame()?;

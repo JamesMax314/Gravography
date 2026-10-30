@@ -170,7 +170,7 @@ pub fn bench(args: &BenchArgs) -> Result<()> {
     for (name, scene) in &scenes {
         if uploaded.as_ref().is_none_or(|(spec, _)| *spec != scene.sky) {
             let sky = load_sky(scene, args.no_cache)?;
-            uploaded = Some((scene.sky, GpuSky::upload(&ctx, &sky)?));
+            uploaded = Some((scene.sky.clone(), GpuSky::upload(&ctx, &sky)?));
         }
         let (_, sky) = uploaded.as_ref().expect("uploaded above");
         println!("\n{name}:");
