@@ -6,7 +6,7 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
 
 ## Current state
 
-- WP-00 to WP-06 done.
+- WP-00 to WP-07 done.
   - `gravography-physics`: Kerr–Schild metric and derivatives, Hamiltonian ray tracing (DOPRI5/RK4, termination,
     escape direction, `g = 1/p_t`), BL ↔ KS, radii, invariants, observer dynamics, tetrad boosts (WP-06).
   - `gravography-sky`: CIE 1931 table, Planck spectra, blackbody LUT, XYZ → sRGB, deterministic star catalogue,
@@ -14,11 +14,17 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
   - `gravography-render` (WP-06): TOML scene files, `FrameParams`, CPU f64 reference renderer (rayon,
     ray-differential footprints, cube-map shading, effect toggles), auto/manual exposure, ACES/Reinhard tone mapping,
     PNG/EXR output.
+  - `gravography-render::gpu` (WP-07): headless wgpu device (`GpuContext`), WGSL assembly by ordered
+    concatenation (`gpu/shader.rs`, shaders in `gpu/shaders/`), WGSL ports of the KS metric, the Hamiltonian
+    RHS, RK4 and the ray tracer (step caps, termination), and an RK4 test-ray compute pipeline with readback.
+  - `gravography-render::parity` (WP-07): GPU ↔ CPU parity harness (10 fixed cameras, ray grids, status confusion
+    matrix, angular-error quantiles).
   - `gravography` binary: `gravography render --scene … --out …png|exr [--width --height --samples --backend
     --no-cache]`. Only the CPU backend exists; the interactive viewer is not built yet.
 - PRD §9 tests 1–14 pass, as do FR-X3 (scene round trip) and a renderer lensing validation against the exact
-  Schwarzschild lens map.
-- **Next work package:** WP-07 — GPU foundation.
+  Schwarzschild lens map. The RK4 GPU vs CPU-f32 vs CPU-f64 parity test runs on Metal and already meets the
+  test 15 thresholds for the RK4 batch.
+- **Next work package:** WP-08 — GPU ray tracer (DOPRI5 in WGSL, per-pixel trace pass, G-buffer, test 15).
 - Toolchain: rustup, Rust **1.99.1** (`rust-toolchain.toml`).
 - The user approved shipping the CC BY-SA 4.0 CIE table (2026-10-30; see `THIRD_PARTY.md`).
 - Open questions for the user:
@@ -37,7 +43,7 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
 | WP-04 | Observer | done | `wp-04` |
 | WP-05 | Colour & sky | done | `wp-05` |
 | WP-06 | CPU reference renderer + headless CLI | done | `wp-06` |
-| WP-07 | GPU foundation | not started | |
+| WP-07 | GPU foundation | done | `wp-07` |
 | WP-08 | GPU ray tracer | not started | |
 | WP-09 | GPU shading & headless GPU render | not started | |
 | WP-10 | Viewer shell | not started | |
@@ -78,6 +84,113 @@ Template for each entry (copy above the previous entry):
 **Notes for the next agent**
 -
 -->
+
+## WP-07 — GPU foundation — 2026-10-30 — COMPLETE
+
+**Summary**
+- **Headless device:** `GpuContext::new_headless()` uses the high-performance adapter with the adapter's own
+  limits, and returns `Ok(None)` when there is no adapter. `GpuContext::for_tests` prints `SKIPPED <test>: no GPU
+  adapter available`. It panics if an adapter exists but device creation fails, so that failure can't be hidden
+  as a skip.
+- **WGSL module assembly:** `gpu/shader.rs` holds `ShaderModule` constants (`include_str!`). `assemble`
+  concatenates them in order with `// ---- module: <name> ----` headers.
+- **WGSL ports** (`gpu/shaders/`): `common` (status codes, bit-level finiteness test), `kerr_schild`, `geodesic`,
+  `rk4` and `ray` (RK4 `trace_ray` with the same step caps and termination order), plus `test_rays` (entry points
+  `trace_rk4_main` and `eval_rhs_main`).
+- **Test-ray pipeline:** `TestRayPipeline::{trace, eval_rhs}` uploads a batch of `(x, p)` rays, dispatches
+  64-wide workgroups and reads the results back with a blocking map.
+- **Parity harness** (`parity.rs`):
+  - `parity_cameras()`: 10 cameras (Schwarzschild; Kerr 0.5/0.9/0.998; hover, ZAMO, orbit, infall inside the
+    horizon, boosted 0.9c);
+  - `camera_rays()`;
+  - `RayOutcome` built from CPU f32/f64 or GPU results;
+  - `compare()` → `Comparison` (confusion matrix, sorted angular errors, quantiles, `fraction_within`, `merge`,
+    `summary`).
+- **`Tetrad` reuse:** the harness uses `Tetrad::boosted` (WP-06) for moving cameras.
+
+**Key files/modules**
+- `crates/gravography-render/src/gpu/context.rs`: `GpuContext`.
+- `crates/gravography-render/src/gpu/shader.rs`: module list and assembly, plus naga validation tests.
+- `crates/gravography-render/src/gpu/test_rays.rs`: `GpuTraceParams`, `GpuRay`, `GpuRayResult`, `GpuPhase`
+  (`#[repr(C)]` Pod) and `TestRayPipeline`.
+- `crates/gravography-render/src/gpu/shaders/*.wgsl`: the WGSL ports (mapping table in `docs/physics.md` § "GPU
+  port (f32)").
+- `crates/gravography-render/src/parity.rs`: the harness.
+- `crates/gravography-render/src/cpu.rs`: new `status_from_index`.
+- `crates/gravography-render/tests/gpu_parity.rs`: GPU acceptance tests.
+
+**Decisions & deviations**
+- **Crate placement:** the GPU code lives in `gravography-render` as the PRD describes (no feature flag), so
+  `wgpu` is a normal dependency of the render crate and the app.
+- **Uniform/storage layout:** params go in a 64-byte uniform; rays, results and RHS outputs go in storage arrays.
+  Layouts are checked twice: by Rust size/offset assertions, and against naga's computed WGSL layout
+  (`layouts_match_naga`).
+- **Pipeline layout:** auto-derived per entry point (`layout: None`). Each pipeline gets its own bind group from
+  `get_bind_group_layout(0)`, because unused bindings are absent from derived layouts.
+- **Matching inputs:** the GPU and CPU f32 paths start from identical f32 inputs (f64 camera rays rounded once).
+  `r_+` is computed in f32 on the CPU and uploaded.
+- **RK4 step budget:** `max_steps = 20 000` for the RK4 batch (never reached; keeps dispatches short).
+- New dependencies:
+  - `wgpu` 30 (GPU);
+  - `bytemuck` with `derive` (Pod structs);
+  - `pollster` (blocking on adapter/device futures; tiny, no transitive deps).
+  - naga comes via `wgpu::naga` for the WGSL validation tests; it is not a separate dependency.
+
+**Tests**
+- `cargo test --workspace`: 190 passed, 1 ignored (sky production bake; sky code untouched). New: 11 render
+  unit tests, 2 GPU integration tests.
+- **WP-07 acceptance (`rk4_gpu_vs_cpu_f32_vs_cpu_f64`):** 10,240 rays, Apple M2 Pro (Metal), all three pairs:
+
+  | Pair | Status agreement | p50 angle | p99 angle | Max angle |
+  |---|---|---|---|---|
+  | GPU vs CPU-f32 | 100% | 1.3e-7 rad | 8.4e-5 rad | 1.4e-3 rad |
+  | GPU vs CPU-f64 | 100% | 1.9e-7 rad | 6.1e-5 rad | 1.6e-3 rad |
+  | CPU-f32 vs CPU-f64 | 100% | 1.4e-7 rad | 4.4e-5 rad | 2.8e-4 rad |
+
+  - The largest errors are near-critical rays of the `r = 4` prograde orbiter.
+  - Assertions: PRD test 15 thresholds (≥ 99.5% status; ≥ 99% of rays within 1e-3 rad) for every pair.
+  - The per-camera table is printed with `--nocapture`.
+- **`gpu_rhs_matches_cpu_f32`:** GPU Hamiltonian RHS vs CPU f32 at points along every camera's rays: max 5.5e-7
+  of the natural scale (≈ 5 ulp); tolerance 1e-5.
+- **Unit tests:**
+  - WGSL validates in naga;
+  - assembly order and headers; every `.wgsl` file is assembled;
+  - struct layouts (Rust and naga);
+  - params conversion; status-code round trip;
+  - comparison statistics; precise small-angle `angle_between`;
+  - all parity cameras valid and their rays null; the CPU-only f32 vs f64 harness runs.
+
+**Visual checks**
+- None: there is no GPU image output in this WP. The WP-06 reference renders are unchanged.
+
+**Performance**
+- Both GPU tests together take ≈ 7 s, mostly the CPU f64/f32 traces. The GPU dispatch of 1024 RK4 rays takes
+  milliseconds. Full suite ≈ 47 s wall time including the build.
+
+**Known issues / tech debt**
+- **`for_tests` in the library:** `GpuContext::for_tests` sits in library code (used by integration tests), and
+  panics on device-creation failure by design.
+- **One pipeline per call:** the test-ray pipeline creates buffers per call. Fine for tests; the WP-08 renderer
+  should keep persistent buffers.
+- **Metal only:** only measured on Metal (M2 Pro). Other backends should pass the same thresholds but are
+  untested.
+
+**Notes for the next agent (WP-08)**
+- **Adding DOPRI5:** add a `dopri5.wgsl` module ported from `ode.rs::{dopri5_step, error_norm,
+  StepController}`, and a DOPRI5 branch of `trace_ray` in `ray.wgsl` following the Rust loop exactly. That
+  covers rejected steps, `h_min` acceptance, FSAL `k_last` and `steps + rejected >= max_steps`.
+- **Extending the assembly:** append new modules to a new module list in `shader.rs`. The
+  `every_module_is_listed_once` test needs each `.wgsl` file to be in some assembly, so update it to check the
+  union of lists.
+- **Reusing the harness:** `parity.rs` is ready for test 15. Swap the RK4 batch for the DOPRI5 per-pixel tracer
+  and compare against CPU f64 DOPRI5 (`TraceParams::cpu_reference`) with the GPU tolerances
+  (`docs/PRD.md` §5.5: rtol ~1e-5–1e-4). Expect status disagreements only near the critical curve.
+- **Pitfalls:**
+  - dynamic indexing into a `let` array in WGSL is not portable. Use `var`, as `geodesic.wgsl` does for
+    `dl_lo`.
+  - WGSL has no `isnan`; use `is_finite_f32`.
+  - Map buffers with `PollType::wait_indefinitely()`.
+  - wgpu 30 `RequestAdapterOptions` has an `apply_limit_buckets` field; use `..Default::default()`.
 
 ## WP-06 — CPU reference renderer + headless CLI — 2026-10-30 — COMPLETE
 

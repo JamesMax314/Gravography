@@ -568,3 +568,41 @@ clamped. Display: `encode_sRGB(tonemap(s · rgb))`.
 Sample `k` of a pixel is at offset `frac(½ + k (1/φ₂, 1/φ₂²))` (R2 sequence, `φ₂` the plastic number). Sample 0 is
 the pixel centre. Pixels are computed independently (rayon over rows) and statistics are integer sums, so the
 image is bit-identical between runs (NF-3; tested).
+
+## GPU port (f32)
+
+`crates/gravography-render/src/gpu/` (WP-07). The WGSL modules in `gpu/shaders/` are ports of the Rust physics with
+the same names, the same structure and the same order of operations, so that the GPU reproduces the CPU f32 path
+up to rounding:
+
+| WGSL module | Rust counterpart |
+|---|---|
+| `common.wgsl` | status codes (`cpu::status_index`), `max_abs` |
+| `kerr_schild.wgsl` | `ks_radius`, `ks_fields`, `ks_field_derivatives` |
+| `geodesic.wgsl` | `l_dot_p`, `ks_hamiltonian_rhs` |
+| `rk4.wgsl` | `ode::rk4_step` on the phase state `(x, p)` |
+| `ray.wgsl` | `spatial_norm`, `radial_rate`, `step_cap`, `escape_direction`, `trace_ray` (RK4 branch) |
+| `test_rays.wgsl` | parity entry points (`trace_rk4_main`, `eval_rhs_main`) |
+
+Modules are concatenated in that order (`gpu/shader.rs`); naga validates the result in a unit test without a GPU.
+
+**f32 specifics.**
+- WGSL has no `isnan`/`isinf`, and `v != v` can be removed under fast math, so finiteness is tested on the
+  exponent bits (`bitcast<u32>(v) & 0x7f800000 != 0x7f800000`).
+- The Rust step cap guards divisions with `tiny = 1e-300`, which rounds to 0 in f32. WGSL uses 0 explicitly,
+  which matches the CPU f32 path.
+- `r_+` is computed on the CPU in f32 (`Kerr::<f32>::outer_horizon`) and uploaded, so both f32 paths use the same
+  value.
+
+**Parity (WP-07, RK4 test rays).** 10 cameras × 32×32 rays over a 90° field: Schwarzschild and Kerr
+`a ∈ {0.5, 0.9, 0.998}`, outside and inside the horizon, plus a boosted and an orbiting observer. Measured on an
+Apple M2 Pro (Metal):
+- Ray status agrees for 100% of rays in every pair (GPU, CPU f32, CPU f64).
+- Escape directions, 99th percentile: 8e-5 rad (GPU vs CPU f32), 6e-5 rad (GPU vs CPU f64), 4e-5 rad
+  (CPU f32 vs f64).
+- Escape directions, maximum: 1.6e-3 rad, for near-critical rays around a `r = 4` prograde orbiter, where small
+  differences are amplified.
+- The Hamiltonian right-hand side on the GPU matches CPU f32 to 5.5e-7 of its natural scale (≈ 5 ulp).
+
+So f32 precision, not the GPU port, dominates the error budget. Both are well inside PRD §9 test 15
+(≥ 99.5% status, 1e-3 rad for ≥ 99% of rays).

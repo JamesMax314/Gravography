@@ -6,7 +6,8 @@ Written in Rust with `wgpu`; macOS (Apple Silicon) is the primary platform.
 
 **Status:** early development. The CPU physics (geodesics, observers), the sky model (colour science, star
 field, cube-map baking) and a CPU f64 reference renderer with a headless `render` command are implemented and
-tested; there is no GPU renderer or interactive viewer yet. See `docs/PRD.md` for the specification and
+tested. The GPU backend has a headless wgpu device and an RK4 test-ray tracer that is checked against the
+CPU (parity harness); the GPU renderer and the interactive viewer are not built yet. See `docs/PRD.md` for the specification and
 `docs/progress_report.md` for progress.
 
 ## Building
@@ -24,6 +25,9 @@ cargo run --release -p gravography-sky --example sky_preview -- target/screensho
 ```
 
 Property tests use a fixed seed (`.cargo/config.toml`); set `PROPTEST_RNG_SEED=<n>` to explore others.
+GPU tests (`crates/gravography-render/tests/gpu_parity.rs`) run on the default wgpu adapter (Metal on macOS). On a
+machine without a GPU adapter they print `SKIPPED …` and pass. Run them with `-- --nocapture` to see the GPU ↔ CPU
+parity report.
 
 Requires Rust 1.99 or newer (edition 2024); the pinned version is in `rust-toolchain.toml`.
 
