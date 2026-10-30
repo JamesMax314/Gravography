@@ -1,6 +1,8 @@
 //! Viewer state that does not touch the GPU: display settings, internal resolution and progressive accumulation.
 
-use gravography_render::{Exposure, Scene, ToneMap};
+use std::time::Duration;
+
+use gravography_render::{Effects, Exposure, Scene, ToneMap};
 
 /// Smallest and largest render scale (internal resolution / window resolution).
 pub const RENDER_SCALE_RANGE: (f32, f32) = (0.25, 1.0);
@@ -18,7 +20,13 @@ pub struct ViewSettings {
     pub tone_map: ToneMap,
     /// Exposure.
     pub exposure: Exposure,
+    /// Pedagogical effect toggles (`docs/PRD.md` §6.4).
+    pub effects: Effects,
 }
+
+/// Shortest interval between auto-exposure meterings while the camera keeps moving (each metering is a blocking
+/// HDR readback; a GPU reduction is planned for WP-12).
+pub const METER_INTERVAL: Duration = Duration::from_secs(1);
 
 impl ViewSettings {
     /// Settings from a scene file. The scene's sample count becomes the progressive target (at least 16 so a
@@ -30,13 +38,16 @@ impl ViewSettings {
             render_scale: 0.5,
             tone_map: scene.render.tone_map,
             exposure: scene.render.exposure,
+            effects: scene.render.effects,
         }
     }
 
     /// Whether changing from `self` to `new` invalidates the accumulated image (exposure and tone map do not: they
     /// are applied when presenting).
     pub fn resets_accumulation(&self, new: &Self) -> bool {
-        self.samples != new.samples || self.render_scale.to_bits() != new.render_scale.to_bits()
+        self.samples != new.samples
+            || self.render_scale.to_bits() != new.render_scale.to_bits()
+            || self.effects != new.effects
     }
 }
 
@@ -80,10 +91,12 @@ impl Accumulation {
         self.done >= self.target
     }
 
-    /// Whether auto exposure should be re-metered after the sample just recorded: after the first sample (a quick
-    /// estimate) and at convergence (the final value), to avoid a GPU readback every frame.
-    pub fn meter_exposure_now(&self) -> bool {
-        self.done == 1 || self.converged()
+    /// Whether auto exposure should be re-metered after the sample just recorded, given the time since the last
+    /// metering (`None`: never metered). Always at convergence (the final value); after the first sample only if
+    /// at least [`METER_INTERVAL`] has passed, so a moving camera (which restarts every frame) does not read the
+    /// image back every frame.
+    pub fn meter_exposure_now(&self, since_last: Option<Duration>) -> bool {
+        self.converged() || (self.done == 1 && since_last.is_none_or(|d| d >= METER_INTERVAL))
     }
 }
 
@@ -103,14 +116,17 @@ mod tests {
     #[test]
     fn accumulation_progresses_and_meters() {
         let mut a = Accumulation::new(3);
+        let recent = Some(Duration::from_millis(100));
         assert_eq!(a.next_sample(), Some(0));
         a.advance();
-        assert!(a.meter_exposure_now());
+        assert!(a.meter_exposure_now(None));
+        assert!(a.meter_exposure_now(Some(METER_INTERVAL)));
+        assert!(!a.meter_exposure_now(recent), "throttled while moving");
         assert_eq!(a.next_sample(), Some(1));
         a.advance();
-        assert!(!a.meter_exposure_now());
+        assert!(!a.meter_exposure_now(None));
         a.advance();
-        assert!(a.converged() && a.meter_exposure_now());
+        assert!(a.converged() && a.meter_exposure_now(recent));
         assert_eq!(a.next_sample(), None);
         a.advance();
         assert_eq!(a.done, 3);
@@ -130,5 +146,8 @@ mod tests {
         let mut u = s;
         u.samples = 64;
         assert!(s.resets_accumulation(&u));
+        let mut e = s;
+        e.effects.lensing = false;
+        assert!(s.resets_accumulation(&e));
     }
 }

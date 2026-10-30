@@ -1,10 +1,13 @@
-//! Interactive viewer (`docs/PRD.md` WP-10): winit window, wgpu surface, progressive GPU rendering of a fixed
-//! camera, egui settings panel, resize handling and FR-X1 screenshots.
+//! Interactive viewer (`docs/PRD.md` WP-10, WP-11): winit window, wgpu surface, progressive GPU rendering, egui
+//! panel and HUD, flight controls, resize handling and FR-X1 screenshots.
 //!
-//! Each redraw adds one sample to the accumulation buffer until the target is reached; the present pass
+//! Each redraw first applies panel changes and advances the observer ([`flight::Flight::update`]). If the camera
+//! moved, accumulation restarts; otherwise one more sample is added until the target is reached. The present pass
 //! tone-maps the accumulation buffer onto the window and egui draws on top. Exposure and the tone map are applied
 //! when presenting, so changing them does not restart accumulation.
 
+pub mod flight;
+pub mod input;
 pub mod screenshot;
 pub mod state;
 pub mod ui;
@@ -15,20 +18,24 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
 use gravography_physics::TraceParams;
+use gravography_render::camera::Projection;
 use gravography_render::gpu::{GpuContext, GpuFrame, GpuRenderer, GpuSky, Presenter};
 use gravography_render::output::write_rgb8_png;
+use gravography_render::scene::{ObserverSpec, PresetKind};
 use gravography_render::tonemap::log_average_luminance;
 use gravography_render::{FrameParams, Scene, Sky, write_image};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
-use winit::event::{ElementState, KeyEvent, WindowEvent};
+use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowId};
 
+use self::flight::{Camera, Flight, Hud, check_preset};
+use self::input::{KeyAction, ThrustKeys, degrees_per_pixel, drag_to_look, key_action};
 use self::screenshot::screenshot_paths;
 use self::state::{Accumulation, ViewSettings, internal_size};
-use self::ui::{Status, settings_panel};
+use self::ui::{FlightPanel, Status, hud_lines, hud_window, settings_panel};
 
 /// Viewer start-up options.
 pub struct ViewerOptions {
@@ -38,7 +45,8 @@ pub struct ViewerOptions {
     pub sky: Sky,
     /// Where screenshots are written.
     pub screenshot_dir: PathBuf,
-    /// Scripted check: converge, screenshot, resize, converge, screenshot, exit.
+    /// Scripted check: converge, screenshot, resize, converge, screenshot, fall through the horizon, converge,
+    /// screenshot, exit.
     pub smoke_test: bool,
 }
 
@@ -70,8 +78,12 @@ enum SmokeStage {
     Converge1,
     /// Wait until the surface size differs from `from`.
     Resizing { from: (u32, u32) },
-    /// Wait for convergence at the new size, then screenshot and exit.
+    /// Wait for convergence at the new size, then screenshot, change the spin and start a radial infall.
     Converge2,
+    /// Falling until inside the horizon, then pause.
+    Falling,
+    /// Wait for convergence inside the horizon, then screenshot and exit.
+    Converge3,
     /// Finished.
     Done,
 }
@@ -109,6 +121,22 @@ struct Gfx {
     last_frame: Instant,
     screenshot_counter: u32,
     screenshot_requested: bool,
+    /// The observer and its controls.
+    flight: Flight,
+    /// Preset being edited in the panel.
+    editor: ObserverSpec,
+    /// Held thrust keys.
+    keys: ThrustKeys,
+    /// Left mouse button held over the 3D view (mouse look).
+    dragging: bool,
+    /// Last cursor position (physical pixels).
+    cursor: Option<(f64, f64)>,
+    /// Camera of the accumulated image.
+    rendered: Option<Camera>,
+    /// When exposure and ray statistics were last read back.
+    last_meter: Option<Instant>,
+    /// Wall-clock time of the last flight update.
+    last_update: Instant,
 }
 
 impl ApplicationHandler for App {
@@ -142,20 +170,45 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
-                        logical_key,
-                        state: ElementState::Pressed,
-                        repeat: false,
+                        physical_key: PhysicalKey::Code(code),
+                        state,
+                        repeat,
                         ..
                     },
                 ..
-            } if !response.consumed => match logical_key {
-                Key::Character(c) if c.eq_ignore_ascii_case("p") => {
-                    gfx.screenshot_requested = true;
+            } => {
+                if let Some(action) = key_action(code) {
+                    let pressed = state == ElementState::Pressed;
+                    if gfx.key(action, pressed, repeat, response.consumed) {
+                        event_loop.exit();
+                    }
                     gfx.window.request_redraw();
                 }
-                Key::Named(NamedKey::Escape) => event_loop.exit(),
-                _ => {}
-            },
+            }
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => {
+                // Start a drag only over the 3D view; always end it.
+                gfx.dragging = state == ElementState::Pressed && !response.consumed;
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                let now = (position.x, position.y);
+                if let (true, Some(last)) = (gfx.dragging, gfx.cursor) {
+                    let Projection::Rectilinear { fov_deg } = self.opts.scene.camera.projection;
+                    let deg = degrees_per_pixel(fov_deg, gfx.config.height);
+                    let (dy, dp) = drag_to_look(now.0 - last.0, now.1 - last.1, deg);
+                    gfx.flight.look_by(dy, dp);
+                    gfx.window.request_redraw();
+                }
+                gfx.cursor = Some(now);
+            }
+            WindowEvent::Focused(false) => {
+                // Key releases are lost while unfocused: drop held keys so thrust does not stick.
+                gfx.keys.clear();
+                gfx.dragging = false;
+            }
             WindowEvent::RedrawRequested => {
                 if let Err(e) = gfx.redraw(&self.opts) {
                     self.fail(event_loop, e);
@@ -210,8 +263,44 @@ impl App {
                 }
                 Ok(())
             }
-            SmokeStage::Converge2 if gfx.accum.converged() => gfx.smoke_screenshot(&self.opts).map(|_| {
-                println!("smoke test passed: rendered, resized and wrote screenshots at two sizes");
+            SmokeStage::Converge2 if gfx.accum.converged() => gfx.smoke_screenshot(&self.opts).and_then(|_| {
+                // Spin up while hovering (keeps the state), then fall in from r = 8 at 4 M/s.
+                if let Some(m) = gfx.flight.set_spin(0.5) {
+                    anyhow::bail!("spin change while hovering at r = 30 reset the observer: {m}");
+                }
+                let infall = ObserverSpec {
+                    preset: PresetKind::RadialInfall,
+                    r: 8.0,
+                    ..flight::safe_preset()
+                };
+                gfx.flight.apply_preset(&infall).map_err(|e| anyhow!(e))?;
+                gfx.flight.settings.time_warp = 4.0;
+                gfx.flight.settings.paused = false;
+                self.smoke = SmokeStage::Falling;
+                Ok(())
+            }),
+            SmokeStage::Falling => {
+                let hud = Hud::new(&gfx.flight, &gfx.keys);
+                if gfx.flight.settings.paused {
+                    Err(anyhow!("the infall was reset: {}", gfx.status.message))
+                } else if hud.r >= 1.5 {
+                    Ok(())
+                } else if hud.region != gravography_physics::Region::InsideHorizon {
+                    Err(anyhow!("r = {} but region {:?}", hud.r, hud.region))
+                } else {
+                    gfx.flight.settings.paused = true;
+                    println!(
+                        "smoke test: inside the horizon at r = {:.3} M, τ = {:.3} M",
+                        hud.r, hud.tau
+                    );
+                    self.smoke = SmokeStage::Converge3;
+                    Ok(())
+                }
+            }
+            SmokeStage::Converge3 if gfx.accum.converged() => gfx.smoke_screenshot(&self.opts).map(|_| {
+                println!(
+                    "smoke test passed: rendered, resized, flew through the horizon and wrote screenshots at each stage"
+                );
                 self.smoke = SmokeStage::Done;
                 event_loop.exit();
             }),
@@ -276,6 +365,7 @@ impl Gfx {
         let egui_renderer =
             egui_wgpu::Renderer::new(&ctx.device, format, egui_wgpu::RendererOptions::default());
 
+        let flight = Flight::new(opts.scene.kerr()?, &opts.scene.observer).map_err(|e| anyhow!(e))?;
         let mut settings = ViewSettings::from_scene(&opts.scene);
         if opts.smoke_test {
             // Few samples so the scripted check converges quickly.
@@ -306,6 +396,14 @@ impl Gfx {
             last_frame: Instant::now(),
             screenshot_counter: 0,
             screenshot_requested: false,
+            editor: *flight.preset(),
+            flight,
+            keys: ThrustKeys::default(),
+            dragging: false,
+            cursor: None,
+            rendered: None,
+            last_meter: None,
+            last_update: Instant::now(),
             ctx,
         })
     }
@@ -321,11 +419,47 @@ impl Gfx {
         self.config.width = size.width;
         self.config.height = size.height;
         self.surface.configure(&self.ctx.device, &self.config);
-        self.restart();
+        self.restart(true);
     }
 
-    /// Restarts accumulation (reallocating the target if the internal size changed).
-    fn restart(&mut self) {
+    /// Handles a mapped key. Thrust keys are tracked while held (releases always count, so keys cannot stick
+    /// when egui takes focus); other actions fire once per press when egui does not want the keyboard. Returns
+    /// `true` to quit.
+    fn key(&mut self, action: KeyAction, pressed: bool, repeat: bool, consumed: bool) -> bool {
+        if let KeyAction::Thrust(k) = action {
+            if !pressed || !consumed {
+                self.keys.set(k, pressed);
+            }
+            return false;
+        }
+        if !pressed || repeat || consumed {
+            return false;
+        }
+        let s = &mut self.flight.settings;
+        match action {
+            KeyAction::Thrust(_) => {}
+            KeyAction::CutThrust => {
+                self.keys.clear();
+                if let Some(m) = self.flight.cut_thrust() {
+                    self.status.message = m;
+                }
+            }
+            KeyAction::TogglePause => s.paused = !s.paused,
+            KeyAction::Step => self.flight.request_step(),
+            KeyAction::WarpSlower => s.time_warp *= 0.5,
+            KeyAction::WarpFaster => s.time_warp *= 2.0,
+            KeyAction::ThrustWeaker => s.thrust *= 0.5,
+            KeyAction::ThrustStronger => s.thrust *= 2.0,
+            KeyAction::Screenshot => self.screenshot_requested = true,
+            KeyAction::Quit => return true,
+        }
+        self.flight.settings = self.flight.settings.clamped();
+        false
+    }
+
+    /// Restarts accumulation (reallocating the target if the internal size changed). `hard` (settings, size)
+    /// re-meters exposure on the next sample; a camera move keeps the throttled metering of a moving view.
+    fn restart(&mut self, hard: bool) {
         let (w, h) = internal_size(
             (self.config.width, self.config.height),
             self.settings.render_scale,
@@ -334,18 +468,58 @@ impl Gfx {
             self.target = GpuFrame::new(&self.ctx, w, h, self.target.max_steps);
         }
         self.accum = Accumulation::new(self.settings.samples);
-        self.log_average = None;
+        self.rendered = Some(self.flight.camera());
+        if hard {
+            self.last_meter = None;
+        }
     }
 
-    /// Frame parameters for a `width × height` render of the scene with the current settings.
+    /// Frame parameters for a `width × height` render of the current camera with the current settings.
     fn frame_params(&self, opts: &ViewerOptions, width: u32, height: u32) -> Result<FrameParams> {
-        let mut scene = opts.scene.clone();
-        scene.camera.width = width;
-        scene.camera.height = height;
-        scene.camera.samples = self.settings.samples;
-        scene.render.exposure = self.settings.exposure;
-        scene.render.tone_map = self.settings.tone_map;
-        Ok(scene.frame()?)
+        let cam = self.flight.camera();
+        let frame = FrameParams {
+            kerr: cam.kerr,
+            position: cam.position,
+            tetrad: cam.tetrad,
+            width,
+            height,
+            projection: opts.scene.camera.projection,
+            samples: self.settings.samples,
+            effects: self.settings.effects,
+            exposure: self.settings.exposure,
+            tone_map: self.settings.tone_map,
+        };
+        frame.validate()?;
+        Ok(frame)
+    }
+
+    /// Applies the panel's flight changes and actions.
+    fn apply_panel(&mut self, panel: FlightPanel, actions: ui::Actions) {
+        self.flight.settings = panel.settings.clamped();
+        self.editor = panel.editor;
+        // No-op unless the slider moved.
+        if let Some(m) = self.flight.set_spin(panel.spin) {
+            self.status.message = m;
+        }
+        if actions.apply_preset {
+            self.status.message = match self.flight.apply_preset(&self.editor) {
+                Ok(Some(w)) => format!("preset applied; {w}"),
+                Ok(None) => "preset applied".into(),
+                Err(e) => e,
+            };
+        }
+        if actions.release {
+            self.keys.clear();
+            if let Some(m) = self.flight.cut_thrust() {
+                self.status.message = m;
+            }
+        }
+        if actions.step {
+            self.flight.request_step();
+        }
+        if actions.reset_look {
+            self.flight.reset_look();
+        }
     }
 
     fn exposure_scale(&self) -> f64 {
@@ -360,17 +534,44 @@ impl Gfx {
         let mut settings = self.settings;
         let mut actions = ui::Actions::default();
         let status = self.status.clone();
+        let mut panel = FlightPanel {
+            settings: self.flight.settings,
+            spin: self.flight.kerr.spin(),
+            editor: self.editor,
+        };
+        let check = check_preset(&self.flight.kerr, &self.editor, self.flight.params());
+        let hud = hud_lines(
+            &Hud::new(&self.flight, &self.keys),
+            &status,
+            &self.flight.settings,
+            self.settings.render_scale,
+        );
         let out = self.egui_ctx.run_ui(raw, |ui| {
             egui::Panel::left("settings").show(ui, |ui| {
-                actions = settings_panel(ui, &mut settings, &status);
+                actions = settings_panel(ui, &mut settings, &mut panel, &check, &status);
             });
+            hud_window(ui.ctx(), &hud);
         });
         self.egui_state
             .handle_platform_output(&self.window, out.platform_output);
         let reset = self.settings.resets_accumulation(&settings);
         self.settings = settings;
         if reset {
-            self.restart();
+            self.restart(true);
+        }
+        self.apply_panel(panel, actions);
+
+        // Advance the observer; restart accumulation if the camera moved.
+        let now = Instant::now();
+        let dt = now.duration_since(self.last_update).as_secs_f64();
+        self.last_update = now;
+        let update = self.flight.update(dt, &self.keys);
+        if let Some(m) = update.message {
+            self.status.message = m;
+        }
+        let cam = self.flight.camera();
+        if self.rendered.is_none_or(|r| cam.differs(&r)) {
+            self.restart(false);
         }
         if actions.screenshot || std::mem::take(&mut self.screenshot_requested) {
             match self.screenshot(opts) {
@@ -393,9 +594,20 @@ impl Gfx {
                 s,
             )?;
             self.accum.advance();
-            if self.settings.exposure.auto && self.accum.meter_exposure_now() {
-                let hdr = self.renderer.read_hdr(&self.ctx, &self.target)?;
-                self.log_average = log_average_luminance(&hdr.pixels);
+            if self
+                .accum
+                .meter_exposure_now(self.last_meter.map(|t| t.elapsed()))
+            {
+                if self.settings.exposure.auto {
+                    let hdr = self.renderer.read_hdr(&self.ctx, &self.target)?;
+                    if let Some(l) = log_average_luminance(&hdr.pixels) {
+                        self.log_average = Some(l);
+                    }
+                }
+                let stats = self.renderer.read_stats(&self.ctx, &self.target)?;
+                let n = stats.status.iter().sum::<u64>().max(1) as f64;
+                self.status.ray_rates = Some(stats.status.map(|c| c as f64 / n));
+                self.last_meter = Some(Instant::now());
             }
         }
 
@@ -490,12 +702,12 @@ impl Gfx {
         self.status.samples = (self.accum.done, self.accum.target);
         self.status.exposure_scale = self.exposure_scale();
 
-        // Keep rendering while refining; otherwise wait for input.
+        // Keep rendering while refining or while the simulation runs; otherwise wait for input.
         let egui_wants_repaint = out
             .viewport_output
             .get(&egui::ViewportId::ROOT)
             .is_some_and(|v| v.repaint_delay.is_zero());
-        if !self.accum.converged() || egui_wants_repaint {
+        if !self.accum.converged() || egui_wants_repaint || !self.flight.settings.paused {
             self.window.request_redraw();
         }
         Ok(())
@@ -529,6 +741,16 @@ impl Gfx {
     /// Screenshot for the smoke test, checking that both files exist and the PNG has the window's size.
     fn smoke_screenshot(&mut self, opts: &ViewerOptions) -> Result<()> {
         let (png, exr) = self.screenshot(opts)?;
+        let hud = Hud::new(&self.flight, &self.keys);
+        for line in hud_lines(
+            &hud,
+            &self.status,
+            &self.flight.settings,
+            self.settings.render_scale,
+        ) {
+            println!("  hud: {line}");
+        }
+        println!("  exposure scale {:.4e}", self.exposure_scale());
         let dims = image_dimensions(&png)?;
         anyhow::ensure!(
             dims == (self.config.width, self.config.height),
