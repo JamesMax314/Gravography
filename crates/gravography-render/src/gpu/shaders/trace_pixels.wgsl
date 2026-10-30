@@ -1,22 +1,6 @@
 // trace_pixels.wgsl: per-pixel trace pass (docs/PRD.md §4.3 step 2). One invocation per pixel of the current tile;
 // writes the G-buffer {escape direction, g, status, steps}. Port of CpuRenderer::cast_pixel with DOPRI5.
 
-// G-buffer texel (Rust: gravography_render::gpu::GBufferTexel; 32 bytes).
-struct GBufferTexel {
-    // Unit escape direction (xyz, zero unless escaped) and frequency shift g = 1/p_t (w).
-    dir_g: vec4<f32>,
-    status: u32,
-    steps: u32,
-    rejected: u32,
-    _pad: u32,
-}
-
-// Tile of the image traced by one dispatch (Rust: GpuTile; 16 bytes).
-struct Tile {
-    origin: vec2<u32>,
-    size: vec2<u32>,
-}
-
 @group(0) @binding(0) var<uniform> params: TraceParams;
 @group(0) @binding(1) var<uniform> camera: Camera;
 @group(0) @binding(2) var<uniform> tile: Tile;

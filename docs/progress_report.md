@@ -6,7 +6,7 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
 
 ## Current state
 
-- WP-00 to WP-08 done.
+- WP-00 to WP-09 done.
   - `gravography-physics`: Kerr–Schild metric and derivatives, Hamiltonian ray tracing (DOPRI5/RK4, termination,
     escape direction, `g = 1/p_t`), BL ↔ KS, radii, invariants, observer dynamics, tetrad boosts (WP-06).
   - `gravography-sky`: CIE 1931 table, Planck spectra, blackbody LUT, XYZ → sRGB, deterministic star catalogue,
@@ -20,15 +20,21 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
   - `gravography-render::gpu::tracer` (WP-08): per-pixel DOPRI5 trace pass in WGSL (camera rays generated on
     the GPU), G-buffer `{dir, g, status, steps, rejected}` in a storage buffer, tiled dispatch (256² per
     submission). `TraceParams::gpu_default()` holds the tuned f32 settings.
+  - `gravography-render::gpu::renderer` (WP-09): sky upload (RG32Float 2D-array cube + LUT buffer), shading
+    pass (neighbour footprint, manual trilinear cube sampling, LUT, accumulation), GPU tone mapping, FR-R6 debug
+    views (status / shift / steps).
   - `gravography-render::parity` (WP-07): GPU ↔ CPU parity harness (10 fixed cameras, ray grids, status confusion
     matrix, angular-error quantiles).
-  - `gravography` binary: `gravography render --scene … --out …png|exr [--width --height --samples --backend
-    --no-cache]`. Only the CPU backend exists; the interactive viewer is not built yet.
+  - `gravography` binary: `gravography render --scene … --out …png|exr [--width --height --samples
+    --backend cpu|gpu --debug status|shift|steps --no-cache]`. The GPU backend renders a 960×540×4 spp scene in
+    about 1 s (the CPU takes 35–75 s). The interactive viewer is not built yet.
 - PRD §9 tests 1–14 pass, as do FR-X3 (scene round trip) and a renderer lensing validation against the exact
   Schwarzschild lens map. **PRD test 15 passes**: the GPU per-pixel tracer agrees with the CPU f64 reference
   on 100% of ray statuses, with 99.97% of escape directions within 1e-3 rad.
-- **Next work package:** WP-09 — GPU shading & headless GPU render (test 16, FR-R6 debug views,
-  `--backend gpu`).
+- **PRD test 16 passes:** GPU images match the CPU reference for all `scenes/*.toml`. Total luminance is within
+  0.5%, and at most 3.3% of pixels differ by more than 8 display levels, all of it from the footprint method.
+- **Next work package:** WP-10 — Viewer shell (winit window, wgpu surface, render loop, egui scaffolding,
+  screenshot).
 - Toolchain: rustup, Rust **1.99.1** (`rust-toolchain.toml`).
 - The user approved shipping the CC BY-SA 4.0 CIE table (2026-10-30; see `THIRD_PARTY.md`).
 - Open questions for the user:
@@ -49,7 +55,7 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
 | WP-06 | CPU reference renderer + headless CLI | done | `wp-06` |
 | WP-07 | GPU foundation | done | `wp-07` |
 | WP-08 | GPU ray tracer | done | `wp-08` |
-| WP-09 | GPU shading & headless GPU render | not started | |
+| WP-09 | GPU shading & headless GPU render | done | `wp-09` |
 | WP-10 | Viewer shell | not started | |
 | WP-11 | Interactive flight | not started | |
 | WP-12 | Performance | not started | |
@@ -88,6 +94,119 @@ Template for each entry (copy above the previous entry):
 **Notes for the next agent**
 -
 -->
+
+## WP-09 — GPU shading & headless GPU render — 2026-10-30 — COMPLETE
+
+**Summary**
+- **Sky upload** (`GpuSky::upload`): the `(w, w·T)` cube map becomes a 6-layer RG32Float 2D-array texture with
+  the full mip chain. The CPU data layout already matches layer and row order. The blackbody LUT goes into a
+  storage buffer.
+- **Shading pass** (`shade.wgsl` + `sky.wgsl`), per sample after the trace pass:
+  - footprint from neighbouring G-buffer escape directions (±1 px, the CPU's fallback order, isotropic and
+    unlensed fallbacks);
+  - LOD = `½ log₂(Ω/Ω_texel)`, with manual bilinear/trilinear `textureLoad` sampling identical to the CPU's;
+  - LUT lookup at `g·T`; beaming toggle; XYZ → linear sRGB; written to an accumulation buffer
+    `(Σ rgb, count)`.
+- **Tone mapping** on the GPU (`tonemap.wgsl`): ACES fitted and extended Reinhard, sRGB encoding, packed
+  RGBA8. Matches `tonemap::to_srgb8` to ±1 level.
+- **FR-R6 debug views** (`debug.wgsl`, `DebugView::{Status, Shift, Steps}`), drawn from the last sample's
+  G-buffer.
+- **`GpuRenderer`:** `render` (all samples, the same R2 jitter as the CPU), `read_hdr`, `read_stats`,
+  `tonemap`, `debug_view`.
+- **CLI:** `--backend gpu` (PNG via the GPU tone map; EXR from the HDR readback) and
+  `--debug status|shift|steps`. The GPU device is created before the sky bake, so a missing adapter fails
+  fast.
+- **Shared structs:** `gbuffer.wgsl` holds the G-buffer and tile structs used by the trace, shade and debug
+  shaders.
+
+**Key files/modules**
+- `crates/gravography-render/src/gpu/renderer.rs`: `GpuRenderer`, `GpuSky`, `GpuFrame`, `DebugView`,
+  `GpuShadeParams`, `GpuToneParams`, `GpuDebugParams`.
+- `crates/gravography-render/src/gpu/shaders/{gbuffer,sky,shade,tonemap,debug}.wgsl`: new modules.
+- `crates/gravography-render/src/gpu/shader.rs`: `SHADE_MODULES`, `TONEMAP_MODULES`, `DEBUG_MODULES`.
+- `crates/gravography-render/src/output.rs`: `write_rgb8_png`.
+- `crates/gravography-render/tests/gpu_render.rs`: test 16, tone-map parity, uniform sky, debug views,
+  determinism.
+- `crates/gravography-app/src/main.rs`: GPU backend and debug views.
+
+**Decisions & deviations**
+- **Footprint from neighbours** (PRD §4.3), not extra rays: this is the CPU method with `ε = 1` px. The CPU
+  reference keeps `ε = 0.25` px. Test 16 therefore checks against both:
+  - the reference, with a documented perceptual/luminance tolerance;
+  - the CPU with `ε = 1`, with tight bounds that isolate the f32 port.
+- **Manual texture filtering with `textureLoad`** instead of hardware sampling with gradients (PRD wording:
+  "cube-map sampling with gradients"). It reproduces the CPU sampling exactly (face-edge clamping, explicit LOD)
+  and avoids `FLOAT32_FILTERABLE`. RG16F was rejected because `w·T` overflows f16. Hardware filtering could be
+  revisited in WP-12 if profiling shows sampling matters.
+- **Explicit bind-group layout for the shade pass:** the RG32Float texture must be bound as non-filterable.
+  The other passes use auto layouts.
+- **Exposure:** computed on the CPU from the HDR readback (`display_scale`), for determinism and CPU parity.
+  A GPU log-average reduction is left for the viewer (WP-10/12).
+- **Debug views** show the last sample's G-buffer. The status view counts in `--backend gpu` output are also
+  for the last sample.
+- No new dependencies. PRD unchanged.
+
+**Tests**
+- `cargo test --workspace`: 202 passed, 3 ignored (sky production bake, `test15_full_resolution`,
+  `test16_larger`; both GPU ones were run for this WP and pass). The full suite takes about 62 s wall time,
+  including the build.
+- **Test 16** (`test16_gpu_images_match_cpu_reference`, 96×54, all four scenes). Worst values (scene):
+
+  | Comparison | Total luminance | Mean relative | Pixels > 8 levels |
+  |---|---|---|---|
+  | vs reference | 0.37% (fast_observer) | 2.0% (inside_horizon) | 3.3% (inside_horizon) |
+  | vs `ε = 1` CPU | 1.4e-4 | 1.1e-3 | 0.19% |
+
+  - Bounds: reference 1% / 4% / 6%; `ε = 1` 1e-3 / 3e-3 / 0.5%.
+  - Ignored `test16_larger` (192×108×2 spp): vs reference ≤ 0.46% / 1.3% / 1.8%; vs `ε = 1` ≤ 1.2e-4 / 3.5e-4
+    / 0.07%.
+- **`gpu_tonemap_matches_cpu`:** ±1 level for both operators at three exposures.
+- **`uniform_sky_is_exact_on_gpu`:** a uniform sky gives `w·XYZ(gT)` with `g = (1 − 2/r)^{-1/2}` to 1e-5
+  relative in every lit pixel. On its first run it failed because shadow-edge pixels with 2 samples were half
+  lit; the test now uses 1 sample per pixel. The test was wrong, not the renderer.
+- **`debug_views_render`:** status colours match G-buffer statuses exactly; the shift and steps views are
+  non-uniform.
+- **`gpu_render_is_deterministic`:** two GPU renders are bit-identical (NF-3).
+- **Unit tests:** naga validation of all five shaders and their entry points; naga layouts of `ShadeParams`,
+  `ToneParams` and `DebugParams`.
+
+**Visual checks** (960×540, 4 spp, default sky, `--backend gpu`; `target/screenshots/*_gpu.png`)
+- All four scenes are visually indistinguishable from the WP-06 CPU references:
+  - same shadow sizes and positions;
+  - the Kerr D-shape with photon-ring arcs on the flat side;
+  - the inside-horizon blue-white rim;
+  - the fast observer's forward blaze.
+- Auto-exposure scales agree with the CPU to 1e-4 (e.g. 6.4174e-5 vs 6.4168e-5).
+- **Debug views** (480×270):
+  - status (kerr_edge_on): blue sky with a black D-shaped shadow;
+  - steps (kerr_edge_on): the most steps hug the shadow edge, where near-critical rays orbit;
+  - shift (fast_observer): blueshift peaks at the image centre (direction of motion), white ring at g ≈ 1,
+    pink corners (g ≈ 0.8, matching the WP-06 probe), dark-grey shadow.
+
+**Performance** (Apple M2 Pro, release, 960×540 × 4 spp, wall time including the sky texture upload and pipeline
+compilation):
+- schwarzschild_far 1.2 s; kerr_edge_on 1.5 s; inside_horizon 0.9 s; fast_observer 0.7 s;
+- the CPU reference takes 35–75 s for the same images;
+- mean GPU steps per ray 71 (Schwarzschild) to 118 (Kerr 0.99).
+- No per-pass GPU timings yet (WP-12).
+
+**Known issues / tech debt**
+- **Per-call allocation:** `GpuRenderer::render` allocates the G-buffer, accumulation buffer and uniforms each
+  call, and rebuilds bind groups per sample. That is fine headless; the viewer (WP-10/12) should keep them
+  persistent and accumulate progressively across frames.
+- **Sky upload cost:** uploading the 268 MB sky texture takes a noticeable part of the ~1 s.
+- **Debug-view statistics:** debug views and the GPU statistics use only the last sample.
+- **Exposure readback:** auto exposure needs an HDR readback. The viewer needs a GPU reduction.
+
+**Notes for the next agent (WP-10)**
+- **Viewer per frame:** reuse `GpuRenderer`. Per frame, call `tracer.trace(...)` with a jitter, then the shade
+  pass with `sample_index` (0 resets accumulation). This keeps the accumulation buffer across static frames for
+  progressive refinement (FR-R3, WP-12).
+- **Presenting:** present by tone-mapping `GpuFrame.accum`. `tonemap.wgsl` writes packed RGBA8 to a buffer; for
+  a surface, either copy it into a texture or write a fragment-shader variant that reuses `aces_fitted`,
+  `reinhard_extended` and `srgb_encode`. If the swapchain format is `*Srgb`, skip `srgb_encode`.
+- **Screenshot (FR-X1):** PNG via `GpuRenderer::tonemap` + `output::write_rgb8_png`, EXR via `read_hdr` +
+  `write_image`.
 
 ## WP-08 — GPU ray tracer — 2026-10-30 — COMPLETE
 

@@ -6,8 +6,13 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use gravography_physics::RayStatus;
-use gravography_render::cpu::status_index;
-use gravography_render::{CpuRenderer, Scene, Sky, display_scale, write_image};
+use gravography_physics::TraceParams;
+use gravography_render::cpu::{RenderStats, status_index};
+use gravography_render::gpu::{DebugView, GpuContext, GpuRenderer, GpuSky};
+use gravography_render::output::write_rgb8_png;
+use gravography_render::{
+    CpuRenderer, FrameParams, HdrImage, OutputFormat, Scene, Sky, display_scale, write_image,
+};
 use gravography_sky::{BlackbodyLut, bake_sky_cached};
 
 #[derive(Parser)]
@@ -27,8 +32,19 @@ enum Command {
 enum Backend {
     /// f64 reference renderer (slow, exact).
     Cpu,
-    /// wgpu compute renderer (WP-09).
+    /// wgpu compute renderer (f32, fast).
     Gpu,
+}
+
+/// FR-R6 debug views (GPU backend).
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Debug {
+    /// Ray status: escaped blue, captured black, singular yellow, max-steps red, error magenta.
+    Status,
+    /// Frequency shift g: red (redshift) → white (g = 1) → blue (blueshift), log scale over ±2 stops.
+    Shift,
+    /// Integration steps, logarithmic heat map.
+    Steps,
 }
 
 #[derive(clap::Args)]
@@ -54,6 +70,9 @@ struct RenderArgs {
     /// Do not read or write the baked-sky cache.
     #[arg(long)]
     no_cache: bool,
+    /// Write a debug view instead of the image (GPU backend; PNG output).
+    #[arg(long, value_enum)]
+    debug: Option<Debug>,
 }
 
 fn main() -> Result<()> {
@@ -84,9 +103,6 @@ fn cache_dir() -> Option<PathBuf> {
 }
 
 fn render(args: &RenderArgs) -> Result<()> {
-    if args.backend == Backend::Gpu {
-        bail!("the GPU backend is not implemented yet (WP-09); use --backend cpu");
-    }
     let mut scene = Scene::load(&args.scene).with_context(|| format!("loading {}", args.scene.display()))?;
     if let Some(w) = args.width {
         scene.camera.width = w;
@@ -99,7 +115,17 @@ fn render(args: &RenderArgs) -> Result<()> {
     }
     let frame = scene.frame()?;
     let settings = scene.cpu_settings()?;
-    gravography_render::OutputFormat::from_path(&args.out)?;
+    let format = OutputFormat::from_path(&args.out)?;
+    if args.debug.is_some() && (args.backend != Backend::Gpu || format != OutputFormat::Png) {
+        bail!("--debug needs --backend gpu and a .png output");
+    }
+    // Create the GPU device before the (possibly slow) sky bake so a missing adapter fails fast.
+    let gpu = match args.backend {
+        Backend::Gpu => {
+            Some(GpuContext::new_headless()?.context("no GPU adapter available; use --backend cpu")?)
+        }
+        Backend::Cpu => None,
+    };
 
     let t0 = Instant::now();
     let lut = BlackbodyLut::human_vision();
@@ -113,12 +139,56 @@ fn render(args: &RenderArgs) -> Result<()> {
     );
 
     let t1 = Instant::now();
-    let (image, stats) = CpuRenderer::new(&frame, &sky, settings)?.render();
+    let (stats, scale) = if let Some(ctx) = &gpu {
+        println!("GPU: {}", ctx.describe());
+        render_gpu(ctx, args, &frame, &sky, format)?
+    } else {
+        let (image, stats) = CpuRenderer::new(&frame, &sky, settings)?.render();
+        let scale = display_scale(&frame, &image, &sky);
+        write_image(&args.out, &image, scale, frame.tone_map)
+            .with_context(|| format!("writing {}", args.out.display()))?;
+        (stats, scale)
+    };
     let secs = t1.elapsed().as_secs_f64();
-    let scale = display_scale(&frame, &image, &sky);
-    write_image(&args.out, &image, scale, frame.tone_map)
-        .with_context(|| format!("writing {}", args.out.display()))?;
+    report(&frame, &stats, scale, secs, &args.out, gpu.is_some());
+    Ok(())
+}
 
+/// GPU render (or debug view) to `args.out`; returns the last sample's statistics and the exposure scale.
+fn render_gpu(
+    ctx: &GpuContext,
+    args: &RenderArgs,
+    frame: &FrameParams,
+    sky: &Sky,
+    format: OutputFormat,
+) -> Result<(RenderStats, f64)> {
+    let renderer = GpuRenderer::new(ctx);
+    let gpu_sky = GpuSky::upload(ctx, sky)?;
+    let out = renderer.render(ctx, frame, &gpu_sky, &TraceParams::gpu_default())?;
+    let stats = renderer.read_stats(ctx, &out)?;
+    if let Some(d) = args.debug {
+        let view = match d {
+            Debug::Status => DebugView::Status,
+            Debug::Shift => DebugView::Shift,
+            Debug::Steps => DebugView::Steps,
+        };
+        let bytes = renderer.debug_view(ctx, &out, view)?;
+        write_rgb8_png(&args.out, frame.width, frame.height, bytes)?;
+        return Ok((stats, 1.0));
+    }
+    let image: HdrImage = renderer.read_hdr(ctx, &out)?;
+    let scale = display_scale(frame, &image, sky);
+    match format {
+        OutputFormat::Png => {
+            let bytes = renderer.tonemap(ctx, &out, scale, frame.tone_map)?;
+            write_rgb8_png(&args.out, frame.width, frame.height, bytes)?;
+        }
+        OutputFormat::Exr => write_image(&args.out, &image, scale, frame.tone_map)?,
+    }
+    Ok((stats, scale))
+}
+
+fn report(frame: &FrameParams, stats: &RenderStats, scale: f64, secs: f64, out: &Path, gpu: bool) {
     let n = stats.samples().max(1) as f64;
     let pct = |s: RayStatus| 100.0 * stats.status[status_index(s)] as f64 / n;
     println!(
@@ -126,10 +196,11 @@ fn render(args: &RenderArgs) -> Result<()> {
         frame.width,
         frame.height,
         frame.samples,
-        display(&args.out)
+        display(out)
     );
     println!(
-        "rays: escaped {:.2}%, captured {:.2}%, max-steps {:.3}%, singular {:.3}%, error {:.3}%",
+        "rays{}: escaped {:.2}%, captured {:.2}%, max-steps {:.3}%, singular {:.3}%, error {:.3}%",
+        if gpu { " (last sample)" } else { "" },
         pct(RayStatus::Escaped),
         pct(RayStatus::Captured),
         pct(RayStatus::MaxSteps),
@@ -145,7 +216,6 @@ fn render(args: &RenderArgs) -> Result<()> {
         stats.footprint_partial,
         stats.footprint_fallback
     );
-    Ok(())
 }
 
 fn display(p: &Path) -> String {

@@ -6,8 +6,8 @@ Written in Rust with `wgpu`; macOS (Apple Silicon) is the primary platform.
 
 **Status:** early development. The CPU physics (geodesics, observers), the sky model (colour science, star
 field, cube-map baking) and a CPU f64 reference renderer with a headless `render` command are implemented and
-tested. The GPU backend traces every pixel with DOPRI5 in f32 into a G-buffer and matches the CPU reference
-(PRD test 15); GPU shading and the interactive viewer are not built yet. See `docs/PRD.md` for the specification and
+tested. The GPU backend renders the same images as the CPU reference (PRD tests 15 and 16) in about a second,
+with FR-R6 debug views. The interactive viewer is not built yet. See `docs/PRD.md` for the specification and
 `docs/progress_report.md` for progress.
 
 ## Building
@@ -25,7 +25,7 @@ cargo run --release -p gravography-sky --example sky_preview -- target/screensho
 ```
 
 Property tests use a fixed seed (`.cargo/config.toml`); set `PROPTEST_RNG_SEED=<n>` to explore others.
-GPU tests (`crates/gravography-render/tests/gpu_parity.rs`, `gpu_tracer.rs`) run on the default wgpu adapter (Metal on macOS). On a
+GPU tests (`crates/gravography-render/tests/gpu_parity.rs`, `gpu_tracer.rs`, `gpu_render.rs`) run on the default wgpu adapter (Metal on macOS). On a
 machine without a GPU adapter they print `SKIPPED …` and pass. Run them with `-- --nocapture` to see the GPU ↔ CPU
 parity report.
 
@@ -38,11 +38,17 @@ cargo run --release -p gravography-app -- render --scene scenes/schwarzschild_fa
 ```
 
 Options: `--out <file.png|file.exr>` (PNG: tone-mapped 8-bit sRGB; EXR: linear HDR, exposure applied, not tone
-mapped), `--width W --height H --samples N` (override the scene), `--backend cpu|gpu` (only `cpu` exists until
-WP-09), `--no-cache` (do not use the baked-sky cache). The baked sky (≈ 270 MB at the default 2048² faces) is cached
+mapped), `--width W --height H --samples N` (override the scene), `--backend cpu|gpu` (default `cpu`: f64
+reference; `gpu`: wgpu/Metal, f32, ~50× faster), `--debug status|shift|steps` (GPU only, PNG: ray-status map,
+false-colour frequency shift, step-count heat map), `--no-cache` (do not use the baked-sky cache). The baked sky (≈ 270 MB at the default 2048² faces) is cached
 in `~/Library/Caches/gravography` on macOS (`$XDG_CACHE_HOME/gravography` or `~/.cache/gravography` elsewhere);
 deleting it is always safe. The CPU reference renderer traces every ray in f64 at `rtol = 1e-10`, so a 960×540
-image with 4 samples per pixel takes about a minute on an M1-class Mac.
+image with 4 samples per pixel takes about a minute on an M1-class Mac; the GPU backend takes about a second.
+
+```bash
+cargo run --release -p gravography-app -- render --backend gpu --scene scenes/kerr_edge_on.toml --out target/screenshots/kerr.png
+cargo run --release -p gravography-app -- render --backend gpu --debug shift --scene scenes/fast_observer.toml --out target/screenshots/g.png
+```
 
 Example scenes in `scenes/`: `schwarzschild_far.toml` (static observer at 50 M), `kerr_edge_on.toml` (`a = 0.99`
 seen edge-on), `inside_horizon.toml` (free fall at r = 1.2 M inside a Schwarzschild horizon) and
