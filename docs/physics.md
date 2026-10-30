@@ -296,7 +296,113 @@ photons (`ξ > 0`) appear at `α < 0`.
 | 8 Kerr shadow edges, a = 0.5, 0.9, 0.998 | relative 1e-9 … 3e-11; also via a static camera at r = 1e4 (ξ to 1e-6, α ≈ −r sinψ to 1e-3) |
 | 12 Escape-direction convergence | ≈ R⁻⁴; default error ≤ 3e-7 rad |
 
+## Observer dynamics
+
+Code: `crates/gravography-physics/src/observer.rs` (and `Tetrad::rotated` in `tetrad.rs`).
+
+### Equations of motion and Fermi–Walker transport
+
+The observer state is the KS event `x^μ`, an orthonormal tetrad `e_(a)^μ` with `e_(0) = u`, and proper time `τ`.
+With 4-acceleration `A` (`A·u = 0`), the system integrated in `τ` (`docs/PRD.md` §5.8) is
+
+    dx^μ/dτ     = u^μ,
+    de_(a)^μ/dτ = −Γ^μ_{αβ} u^α e_(a)^β + u^μ g(A, e_(a)) − A^μ g(u, e_(a)).
+
+The second line is `De_(a)/dτ = (u ⊗ A − A ⊗ u)·e_(a)`, the Fermi–Walker law. For `e_(0) = u`
+(`g(u, u) = −1`, `g(A, u) = 0`) it gives `Du/dτ = A`, the equation of motion with thrust. For spatial legs
+(`g(u, e_(i)) = 0`) it gives `De_(i)/dτ = u g(A, e_(i))`: the legs only tilt as needed to stay orthogonal to `u`,
+with no rotation, as a gyroscope would. The generator `u ⊗ A − A ⊗ u` is antisymmetric under `g`, so
+`d/dτ g(e_a, e_b) = 0` exactly. The unit test `fermi_walker_preserves_inner_products` checks this identity
+pointwise, including the metric-derivative term `∂_γ g_{μν} u^γ e_a^μ e_b^ν`.
+
+The state `(x, e_(0..3))` has 20 components and is integrated by DOPRI5 (rtol `1e-10`, atol `1e-12`).
+The coordinate displacement per substep is capped at `0.1 r`. After each accepted substep the tetrad is
+re-orthonormalised by Gram–Schmidt seeded with `(u, e_1, e_2, e_3)`, which keeps `e_(0) ∥ u` and
+`u·u = −1`. The drift before correction is reported (`AdvanceReport::max_constraint_error`). It stays
+`< 1e-9` per substep in the tests.
+
+**Thrust.** The user's thrust `Aⁱ` (units `c²/M`) is given in the transported body frame: `A = Aⁱ e_(i)`. It is
+re-evaluated from the current legs at every RK stage. The look rotation is a separate SO(3) rotation `R`
+(`Tetrad::rotated`, `e'_(i) = Σ_j R_ji e_(j)`). It is not physical. Thrust typed in the view frame `A'` is
+`A = R A'` in the body frame. Conversion to g-forces: `a_SI = a · c² / (G M/c²)`, with
+`G M_☉/c² = 1476.625 m` (IAU nominal `G M_☉`) and `g₀ = 9.80665 m/s²`.
+
+### Stationary observers
+
+Static observers, ZAMOs and circular orbits all move along the Killing field `K = ∂_t + Ω ∂_φ` with constant
+`Ω`. In KS, `∂_φ = −y ∂_x + x ∂_y` (§ "Conserved quantities"), so `K = (1, −Ω y, Ω x, 0)` and `u = N K`,
+`N = (−g(K, K))^{−1/2}`. The norm `g(K, K)` is constant along the orbit, because `K` is Killing and `Ω` is
+constant. Hence
+
+    du^μ/dτ = N² K^ν ∂_ν K^μ = N² (0, −Ω² x, −Ω² y, 0),     a^μ = du^μ/dτ + Γ^μ_{αβ} u^α u^β,
+
+with `N = u^t`. Special cases:
+
+- **Static** (`Ω = 0`): exists where `g_tt < 0`, i.e. outside the ergosurface. The Schwarzschild check is
+  `|a| = M/(r² sqrt(1 − 2M/r))`.
+- **ZAMO** (`Ω = ω = 2Mar/((r² + a²)² − Δ a² sin²θ)`): exists for `r > r_+`. Tested: `L_z = u_φ = 0`, `a·u = 0`.
+- **Circular geodesic** (`Ω = ±M^{1/2}/(r^{3/2} ± a M^{1/2})`, equatorial): `a = 0` to `1e-13` for
+  `a ∈ {0, 0.5, 0.9, 0.999}`. This checks the Christoffel symbols, `K` and the Appendix A formula together.
+
+**Station keeping** (`Motion::Hover`, `Motion::Zamo`): the system above is integrated with `A = a(x)`. After each
+substep the position is snapped back onto the orbit circle (cylindrical radius and `z` held, azimuth kept),
+and `u` is reset to `N K` before Gram–Schmidt. The user's thrust is ignored in these modes.
+
+### Presets
+
+Preset positions use spheroidal `(r, θ, φ̃)` with `x + iy = (r + ia) sinθ e^{iφ̃}`, `z = r cosθ`, `t = 0`.
+`φ̃` is the KS azimuth, not BL `φ`; they differ by `Φ(r)`, which is irrelevant for a starting point. By default
+the camera looks at the hole (forward `= −x⃗/|x⃗|`, up `≈ +z`, or `+x` on the axis). The seeds
+`(u, f, up × f, f × (up × f))` are positively oriented and Gram–Schmidt is triangular with a positive diagonal,
+so `det e_up > 0`, i.e. the tetrad is right-handed (tested).
+
+**Radial infall from rest at infinity** (`E = μ = 1`, `L_z = 0`, `Q = 0`). Kerr's `θ` equation gives
+`Θ(θ) = Q − cos²θ (a²(μ² − E²) + L_z²/sin²θ) ≡ 0`, so `θ` stays constant for every starting `θ`. In Kerr the
+observer is still dragged in `φ`: these are Doran's free-fall observers. On the axis, and for `a = 0`, the fall is
+radial. Radial equation: `R = (E(r² + a²))² − Δ (r² + a²) = 2Mr (r² + a²)`, so `u_r^{BL} = −sqrt(R)/Δ`. The
+KS covector follows from `dt_BL = dt_KS − T'(r) dr`:
+
+    u = −dt_KS + c dr,   c = u_r^{BL} + 2Mr/Δ = (2Mr − sqrt(2Mr (r² + a²)))/Δ = −sqrt(2Mr) / (sqrt(2Mr) + sqrt(r² + a²)),
+
+where the last form, obtained by rationalising with `2Mr − (r² + a²) = −Δ`, is regular across both horizons.
+`dr = ∂_i r dxⁱ` uses the analytic gradient. Tested: `u·u = −1`, `E = 1`, `L_z = Q = 0`, and
+`dr/dτ = −sqrt(2Mr(r² + a²))/Σ` (property test, including inside the horizon).
+
+**Circular orbit**: equatorial, `u = N K` with the Kepler `Ω`, evolved as a free geodesic. It is refused at or
+below the photon orbit, where `K` is not timelike. Below the ISCO it is allowed but unstable; the UI should warn.
+
+### Regions and limits
+
+`Region`: inside the horizon if `r ≤ r_+`, in the ergosphere if `r ≤ r_E(θ)` with `cosθ = z/r`, otherwise
+outside. The simulation stops (`ObserverError::InnerLimit`, observer left at the last valid substep) below
+`r_min = r_− + 0.05`. That is `0.05` near the Schwarzschild singularity, and just outside the inner horizon for
+Kerr (`docs/PRD.md` §5.8). One formula covers both, and it is continuous in `a`. It also stops beyond
+`r_max = 1000` (`OuterLimit`; PRD §5.9 keeps the GPU camera at `r ≲ 200`, and the app may lower it).
+
+### Spin change while flying
+
+Keep the KS position and `uⁱ`. Solve `g_tt (u^t)² + 2 g_ti uⁱ u^t + g_ij uⁱ uʲ = −1` with the new metric for
+`u^t > 0`. In KS, `u^t = −g(u, n)` for the future-directed KS-normal observer `n^μ = −g^{μt}`, so `u^t > 0` means
+future-directed. Of the positive roots (inside the ergosphere both can be positive), take the one closest to the old
+`u^t`. Then re-run Gram–Schmidt with the old spatial legs. Station-keeping observers are rebuilt with the new
+`ω` or refused (e.g. a hover point that is now inside the ergosphere). On error the state is unchanged, and the
+app should reset to a safe preset.
+
+### Validation (PRD §9 tests 9–11, plus Fermi–Walker)
+
+| Test | Result |
+|---|---|
+| 9 SR limit (`M = 1e-12`, β ≤ 0.99, 13 directions, traced) | aberration `cos θ_sky = (cos θ − β)/(1 − β cos θ)` to `1e-9`; `g = 1/(γ(1 − β cos θ))` to `1e-12` |
+| 10 Static Schwarzschild observer, r = 2.2…20, 26 directions | `g = (1 − 2/r)^{−1/2}` to `1e-12` (camera and at escape) |
+| 11 Circular orbits r = 10, a ∈ {0, 0.9}, pro/retro, 10 orbits | radius drift `< 1e-7`, `Ω` to `≤ 1.1e-8` (bound `5e-8`), constraint drift `< 1e-9` |
+| 11 Radial infall, r₀ = 10 | `r(τ)` to `1e-9`, through the horizon to `r_min`; `τ(r₀ → 0) = (2/3) sqrt(r₀³/2)` to `1e-9` |
+| Geodetic precession, Schwarzschild r = 6, 10, 30 | `Δφ = 2π (1 − sqrt(1 − 3M/r))` per orbit (Hartle §14.4), sign included, to `1e-7` |
+| Frame dragging | ZAMO `dφ/dt = ω > 0`; L = 0 infall dragged to `+φ` |
+| Constant thrust, flat space | hyperbolic motion `x = (cosh ατ − 1)/α`, `t = sinh(ατ)/α`, non-rotating frame, to `1e-9` |
+
+The orbit errors are DOPRI5 truncation error. A probe (one orbit, r = 10) showed them falling about 15× per decade
+of `rtol`, e.g. the precession `cos Δφ` error went 4e-7, 3e-8, 2e-9, 1e-10, 9e-12 for `rtol = 1e-8 … 1e-12`.
+
 ## Sections (to be written)
 
-- Observer dynamics and Fermi–Walker transport — WP-04
 - Colour pipeline and sky representation — WP-05

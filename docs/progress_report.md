@@ -6,12 +6,14 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
 
 ## Current state
 
-- WP-00 to WP-03 done. `gravography-physics` has the full single-ray CPU pipeline: Kerr–Schild metric and
-  derivatives, Hamiltonian RHS, invariants, BL ↔ KS transforms, radii, Gram–Schmidt tetrads, DOPRI5/RK4,
-  `trace_ray` with termination/classification and escape direction, camera-ray initial conditions with
-  `g = 1/p_t`, and a Bardeen distant-observer helper. PRD §9 tests 1–8 and 12 pass. No observer dynamics, sky
-  or rendering yet.
-- **Next work package:** WP-04 — Observer.
+- WP-00 to WP-04 done. `gravography-physics` has:
+  - the full single-ray CPU pipeline: Kerr–Schild metric and derivatives, Hamiltonian RHS, invariants,
+    BL ↔ KS transforms, radii, tetrads, DOPRI5/RK4, `trace_ray` and camera rays with `g = 1/p_t`;
+  - observer dynamics (WP-04): `Observer` with thrust, a Fermi–Walker transported tetrad, the presets hover,
+    ZAMO, circular orbit, radial infall and free, regions, inner/outer limits, spin change, look rotation
+    (`Tetrad::rotated`) and g-force conversion.
+- PRD §9 tests 1–12 pass. No sky or rendering yet.
+- **Next work package:** WP-05 — Colour & sky.
 - Toolchain: rustup, pinned to stable **1.99.1** (`rust-toolchain.toml`). Plain `cargo fmt/clippy/test`
   work; the old `PATH=/opt/homebrew/bin` workaround is obsolete (Homebrew Rust is uninstalled).
 - Open questions for the user: none.
@@ -26,7 +28,7 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
 | WP-01 | Metric core | done | `wp-01` |
 | WP-02 | Derivatives, Hamiltonian, invariants | done | `wp-02` |
 | WP-03 | CPU ray tracing | done | `wp-03` |
-| WP-04 | Observer | not started | |
+| WP-04 | Observer | done | `wp-04` |
 | WP-05 | Colour & sky | not started | |
 | WP-06 | CPU reference renderer + headless CLI | not started | |
 | WP-07 | GPU foundation | not started | |
@@ -70,6 +72,99 @@ Template for each entry (copy above the previous entry):
 **Notes for the next agent**
 -
 -->
+
+## WP-04 — Observer — 2026-10-30 — COMPLETE
+
+**Summary**
+- New module `observer`:
+  - `Observer { pos, tetrad, tau, motion }` with `advance(kerr, dτ, thrust_body, params)`: DOPRI5 on the
+    20-component state `(x, e_0..e_3)` with the Fermi–Walker law, Gram–Schmidt re-orthonormalisation after
+    every substep, and an `AdvanceReport` (substeps, rejected, constraint drift before correction);
+  - `Motion::{Free, Hover, Zamo}`: free geodesic + body-frame thrust, or station keeping with automatic thrust;
+  - presets `hover`, `zamo`, `circular_orbit` and `radial_infall`, plus `Observer::new` (free, any `u`);
+  - `reorient`, `release`, `change_spin`, `acceleration`, `zamo_lorentz_factor`;
+  - on `Kerr`: `region` (`Region::{OutsideErgosphere, Ergosphere, InsideHorizon}`), `zamo_angular_velocity`,
+    `keplerian_angular_velocity`, `stationary_velocity` / `stationary_acceleration` (`u ∝ ∂_t + Ω∂_φ`);
+  - helpers `ks_position`, `look_at_hole`, `oriented_tetrad`, `lorentz_factor`, `speed_from_lorentz_factor`,
+    and `acceleration_in_g` with the physical constants.
+- `ObserverError` (thiserror, user-facing messages): `InvalidState`, `InnerLimit`, `OuterLimit`,
+  `IntegrationFailure`.
+- `Tetrad::rotated(R)`: user look rotation of the spatial legs.
+- Validation suite `crates/gravography-physics/tests/observer_validation.rs` (PRD tests 9–11, geodetic
+  precession, frame dragging).
+- `docs/physics.md` § "Observer dynamics": transport law, stationary observers, preset derivations (incl. the
+  horizon-regular infall covector), limits, spin change, validation table.
+
+**Key files/modules**
+- `crates/gravography-physics/src/observer.rs`: everything above, plus unit tests.
+- `crates/gravography-physics/src/error.rs`: `ObserverError`.
+- `crates/gravography-physics/src/tetrad.rs`: `Tetrad::rotated`.
+- `crates/gravography-physics/tests/observer_validation.rs`: analytic validation (≈1.2 s in debug).
+
+**Decisions & deviations**
+- **Inner limit `r_min = r_− + 0.05` for all spins.** It equals the PRD's Schwarzschild `0.05` at `a = 0` and is
+  "r_− + margin" for Kerr, continuous in `a`. At `a = 0.999` it still leaves 0.04 M between `r_min` and `r_+`.
+  There is also an outer limit `r_max = 1000` (not in the PRD; it guards the f32 GPU path, PRD §5.9; the app may
+  lower it to ~200). Both are in `ObserverParams`.
+- **Radial infall works for any `θ` in Kerr, not only on the axis.** With `E = 1`, `L_z = Q = 0`, `θ` is exactly
+  constant (Doran observers), so a general direction is well defined. Off the axis the observer is dragged in
+  `φ`, so the fall is not purely "radial"; this is documented. The UI may still default to the axis for Kerr.
+- **Station keeping is a separate `Motion` mode, not thrust fed into the free equations.** The worldline is pinned
+  (position snapped onto its circle, `u` reset to `N K` every substep), so hover and ZAMO cannot drift, and the
+  transported frame still precesses physically. The user's thrust is ignored in these modes; the app should
+  call `release()` when the user thrusts.
+- **Preset azimuth is the KS `φ̃`, not BL `φ`** (they differ by `Φ(r)`). This avoids the BL singularity at the
+  horizon for infall presets and only matters cosmetically.
+- **Thrust is given in the body (transported) frame.** The look rotation stays app-side: render with
+  `tetrad.rotated(R)`, and convert view-frame thrust with `R · A'`.
+- If `advance` fails part-way, the observer is left at the last valid substep (`tau` shows how far it got), as the
+  PRD's "stops with a message" requires. `change_spin` leaves the observer unchanged on error.
+- PRD §9 test 10 is also checked at escape (`p_t` conserved), and test 9 through the full ray tracer.
+- Tolerance changes in new tests, before the first commit: the circular-orbit `Ω` bound went 1e-9 → 5e-8 and the
+  geodetic-precession bound 1e-8 → 1e-7. The first values ignored how global error accumulates over many orbits.
+  A convergence probe showed the measured errors (Ω 1.1e-8 at a = 0.9 retrograde near its ISCO 8.72; cos Δφ 1e-8
+  at r = 6) are DOPRI5 truncation error, falling ~15× per decade of `rtol`. Details in `docs/physics.md`.
+- Two mutation checks on the transport law (flipping the sign of the `A u·e` term; dropping the `u A·e` term) fail
+  3–4 unit tests each. Pitfall: restoring a file with `mv` from a copy gives it an older mtime, so cargo does not
+  rebuild and keeps running the mutated binary. `touch` the file afterwards.
+- No new dependencies.
+
+**Tests**
+- 107 passed, 0 ignored (92 unit + 8 ray validation + 7 observer validation); 23 new.
+- Test 9 (SR limit, β up to 0.99): aberration ≤ 1e-9, Doppler ≤ 1e-12.
+- Test 10: static blueshift to 1e-12 in 26 directions at r = 2.2, 3, 6, 20.
+- Test 11: circular orbits (r = 10, 10 orbits): radius drift < 1e-7, Ω error ≤ 1.1e-8, constraint drift < 1e-9;
+  radial infall: r(τ) and `τ(r₀ → 0) = (2/3)sqrt(r₀³/2)` to 1e-9 (stopped at r_min = 0.05, crossing the horizon).
+- Geodetic precession `2π(1 − sqrt(1 − 3/r))`, r = 6, 10, 30, pro/retro, to 1e-7 (sign checked).
+- Frame-dragging sign through the observer API (ZAMO `dφ/dt = ω > 0`; L = 0 infall dragged prograde). Kerr axis
+  infall (a = 0.9) stops at `r_− + 0.05` with E, L_z conserved to 1e-8.
+- Unit: FW transport preserves `g(e_a, e_b)` (property test incl. thrust), Kepler orbits need zero thrust
+  (a ≤ 0.999), ZAMO `L_z = 0`, infall covector `E = 1, L = Q = 0` with the right `dr/dτ` (property test,
+  across horizons), right-handed presets, invalid presets refused, hover stays put with a constant frame, flat
+  hyperbolic motion, spin change, g-force conversion, look rotation.
+
+**Visual checks**
+- n/a (first renders in WP-06).
+
+**Performance**
+- Not optimised. One orbit at r = 10 takes ~180 substeps at rtol 1e-10 (each substep is 7 Christoffel
+  evaluations). Fine for one observer per frame.
+
+**Known issues / tech debt**
+- In station-keeping mode each RHS stage evaluates `g_lo` twice (once in the RHS, once in `stationary_velocity`).
+  This is negligible on the CPU.
+- No serde derives yet. Bookmarks (WP-13) will need a serialisable mirror of `Observer` (`h_next` is private
+  step-size memory and can be reset on load).
+- The Kerr static-observer gyroscope precession (frame dragging + geodetic) has no quantitative test. Only the
+  Schwarzschild cases (no precession for static observers; geodetic for orbits) are checked.
+
+**Notes for the next agent**
+- WP-05 does not touch this code. For WP-06/WP-11: build the camera with `Observer::hover(&kerr, r, θ, φ, &params)`
+  or another preset, and render with `observer.tetrad` (or `.rotated(look)`) via `camera_ray_momentum`.
+- App loop (WP-11): `obs.advance(&kerr, dt_wall * warp, &thrust_body, &params)`. On `Err(e)` show `e.to_string()`
+  and reset to a preset. HUD: `kerr.ks_to_bl_position(&obs.pos)`, `obs.region(&kerr)`, `obs.zamo_lorentz_factor`,
+  `acceleration_in_g(sqrt(g(A, A)), mass_solar)` with `A = obs.acceleration(&kerr, &thrust)`.
+- To warn below the ISCO, compare the preset `r` with `kerr.isco(prograde)`.
 
 ## WP-03 — CPU ray tracing — 2026-10-30 — COMPLETE
 
