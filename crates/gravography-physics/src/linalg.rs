@@ -137,30 +137,9 @@ pub fn inverse<T: Real>(m: &Mat4<T>) -> Option<Mat4<T>> {
 }
 
 #[cfg(test)]
-pub(crate) mod test_util {
-    use super::Mat4;
-
-    /// Largest absolute entry-wise difference between two matrices.
-    pub fn max_abs_diff(a: &Mat4<f64>, b: &Mat4<f64>) -> f64 {
-        let mut d = 0.0_f64;
-        for (ra, rb) in a.iter().zip(b) {
-            for (x, y) in ra.iter().zip(rb) {
-                d = d.max((x - y).abs());
-            }
-        }
-        d
-    }
-
-    /// Largest absolute entry of a matrix.
-    pub fn max_abs(a: &Mat4<f64>) -> f64 {
-        a.iter().flatten().fold(0.0_f64, |m, x| m.max(x.abs()))
-    }
-}
-
-#[cfg(test)]
 mod tests {
-    use super::test_util::max_abs_diff;
     use super::*;
+    use crate::test_util::max_abs_diff;
     use approx::assert_relative_eq;
     use proptest::prelude::*;
 

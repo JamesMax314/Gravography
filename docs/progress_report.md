@@ -6,11 +6,12 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
 
 ## Current state
 
-- WP-00 (skeleton) and WP-01 (metric core) done. `gravography-physics` has the scalar abstraction (`Real` for
-  f32/f64), 4×4 linear algebra, the Kerr–Schild metric (`g_lo`, `g_up`, cancellation-free `r`), BL ↔ KS
-  transforms for positions, vectors and covectors, and the characteristic radii. Frame-dragging sign confirmed.
-  No derivatives, geodesics, sky or rendering yet.
-- **Next work package:** WP-02 — Derivatives, Hamiltonian, invariants.
+- WP-00, WP-01 and WP-02 done. `gravography-physics` has: the scalar abstraction (`Real` for f32/f64), 4×4
+  linear algebra, the Kerr–Schild metric with analytic first derivatives, Christoffel symbols, the Hamiltonian
+  and its right-hand side (`ks_hamiltonian_rhs`, the form to port to WGSL), the invariants `E`, `L_z` and
+  Carter `Q`, BL ↔ KS transforms, and the characteristic radii. No integrators, ray tracing, observer, sky or
+  rendering yet.
+- **Next work package:** WP-03 — CPU ray tracing.
 - Toolchain: rustup, pinned to stable **1.99.1** (`rust-toolchain.toml`). Plain `cargo fmt/clippy/test`
   work; the old `PATH=/opt/homebrew/bin` workaround is obsolete (Homebrew Rust is uninstalled).
 - Open questions for the user: none.
@@ -23,7 +24,7 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
 |---|---|---|---|
 | WP-00 | Repository bootstrap | done | `wp-00` |
 | WP-01 | Metric core | done | `wp-01` |
-| WP-02 | Derivatives, Hamiltonian, invariants | not started | |
+| WP-02 | Derivatives, Hamiltonian, invariants | done | `wp-02` |
 | WP-03 | CPU ray tracing | not started | |
 | WP-04 | Observer | not started | |
 | WP-05 | Colour & sky | not started | |
@@ -69,6 +70,72 @@ Template for each entry (copy above the previous entry):
 **Notes for the next agent**
 -
 -->
+
+## WP-02 — Derivatives, Hamiltonian, invariants — 2026-10-30 — COMPLETE
+
+**Summary**
+- Analytic `∂_α r`, `∂_α f`, `∂_α l_μ` (`ks_field_derivatives`) and metric derivatives `ks_dg_lo` / `ks_dg_up`
+  (`MetricDerivs = [Mat4; 4]`, `d[α][μ][ν]`).
+- Christoffel symbols `ks_christoffel` / `Kerr::christoffel` (`Γ[μ][α][β]`) and `Kerr::geodesic_acceleration`.
+- Hamiltonian `ks_hamiltonian` and RHS `ks_hamiltonian_rhs` in vector-only form (no rank-3 tensors), with
+  `dp_t = 0` exactly.
+- Invariants on `Kerr`: `energy`, `angular_momentum_z`, `carter_q`. `carter_q` uses a Cartesian form that is
+  regular on the spin axis, and takes `μ² = −2H`, so it works for null and timelike momenta.
+- `docs/physics.md`: derivations of all the above, the regular-Q derivation, and validation notes.
+
+**Key files/modules**
+- `crates/gravography-physics/src/kerr_schild.rs`: field and metric derivatives (next to `ks_fields`).
+- `crates/gravography-physics/src/connection.rs`: Christoffel symbols and geodesic acceleration.
+- `crates/gravography-physics/src/geodesic.rs`: Hamiltonian and Hamilton's equations.
+- `crates/gravography-physics/src/invariants.rs`: `E`, `L_z`, `Q`.
+- `crates/gravography-physics/src/test_util.rs`: shared test helpers (moved from `linalg`/`kerr_schild`):
+  `event()` and `momentum()` strategies, `richardson()` finite-difference derivative, matrix norms.
+
+**Decisions & deviations**
+- Derivative checks use Richardson-extrapolated central differences (`O(h⁴)`), not dual numbers. PRD test 2
+  allows "and/or", and this avoids a `num-dual` dependency and its `Real`/`FloatConst` plumbing. The tests were
+  mutation-checked: a planted sign error in `∂l_y` failed all three derivative tests.
+- At `r = 0` all field derivatives are returned as zero (consistent with WP-01's `f = 0` there). The disk is a
+  branch surface; ray code must stop before reaching it.
+- The Hamiltonian RHS returns `(dx, dp)` as two `Vec4`s. The phase-space state type for integrators is left to
+  WP-03.
+- `carter_q` returns NaN at `r = 0` (documented). There is no public `p_theta` function. The BL route
+  (`ks_to_bl_covector(..)[2]`) gives `p_θ` where it is needed.
+- Workspace lint `clippy::needless_range_loop = "allow"`: tensor code reads best with explicit index loops that
+  mirror the maths and the future WGSL.
+- No new dependencies.
+
+**Tests**
+- 55 passed, 0 ignored (`gravography-physics`); 18 new. Property suites also pass with `PROPTEST_CASES=10000`
+  (all suites) and 10⁶ cases (flow-conservation test); runtime scales with case count, confirming the env var takes effect.
+- PRD §9 test 2: `field_derivatives_match_finite_differences` and `metric_derivatives_match_finite_differences`
+  agree to 1e-9 of scale (expected ~1e-12). Plus `∂g^{μν} = −g^{μρ}∂g_{ρσ}g^{σν}`, Schwarzschild `∂r`/`∂f` closed
+  forms, `M = 0` gives zero derivatives, and f32 tracks f64 to 1e-5.
+- Christoffels: symmetry (4ε), metric compatibility (1e-13·(1+f)³/r), static-observer acceleration
+  `M/(r² sqrt(1−2M/r))` (1e-12).
+- Hamiltonian: RHS equals the tensor form; RHS equals the finite-difference gradient of `H` (independent of the
+  analytic derivatives); Hamilton flow equals the geodesic equation with `Γ`; flat space gives straight rays.
+- Invariants: `dH, dE, dL_z, dQ` along the flow vanish (1e-9 of scale); equality with the BL definitions; for `a = 0`,
+  `Q + L_z² = |x × p|²`; Bardeen spherical-photon-orbit `ξ, η` round-trip through BL → KS (1e-12).
+
+**Visual checks**
+- n/a
+
+**Performance**
+- n/a
+
+**Known issues / tech debt**
+- `ks_hamiltonian_rhs` calls `ks_field_derivatives`, which calls `ks_fields` (r computed once). That is fine for now;
+  WP-12 may fuse it further for the GPU.
+
+**Notes for the next agent**
+- WP-03 integrators: use `ks_hamiltonian_rhs` (or `Kerr::hamiltonian_rhs`). `t` is cyclic, so you may skip
+  integrating `x[0]` for rays, but keep it available for tests.
+- PRD test 8 (Kerr shadow edge): `invariants::tests::spherical_photon_orbit_constants_are_consistent` shows
+  how to build a photon from Bardeen `ξ, η` via `bl_to_ks_covector`.
+- PRD test 4 (conservation along rays): use `Kerr::{hamiltonian, energy, angular_momentum_z, carter_q}`.
+  `carter_q` is safe on the axis.
+- Strategies `test_util::event()` / `momentum()` and `test_util::richardson()` are available for new unit tests.
 
 ## Maintenance — Toolchain update to Rust 1.99.1 — 2026-10-30 — COMPLETE
 

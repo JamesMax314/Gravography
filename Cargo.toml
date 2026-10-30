@@ -27,6 +27,8 @@ unwrap_used = "warn"
 float_cmp = "warn"
 dbg_macro = "warn"
 todo = "warn"
+# Tensor code reads best with explicit index loops (Γ^μ_{αβ}, ∂_α g^{μν}) that mirror the maths and the WGSL port.
+needless_range_loop = "allow"
 
 [profile.release]
 debug = "line-tables-only"

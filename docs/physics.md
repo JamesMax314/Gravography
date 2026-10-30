@@ -120,10 +120,102 @@ Teukolsky 1972). With `χ = a/M`:
 
 Upper sign = prograde throughout.
 
+## Derivatives of the Kerr–Schild fields
+
+Code: `ks_field_derivatives`, `ks_dg_lo`, `ks_dg_up` in `crates/gravography-physics/src/kerr_schild.rs`.
+All fields are independent of `t`, so every `∂_t` vanishes. Let `D = r⁴ + a² z²` and `q = r² + a²`.
+
+**`∂_i r`.** Implicit differentiation of `F(r, x) = r⁴ − (ρ² − a²) r² − a² z² = 0`:
+`∂_i r = −F_{,i} / F_{,r}` with `F_{,r} = 4r³ − 2(ρ² − a²) r`, `F_{,x} = −2x r²`, `F_{,y} = −2y r²`,
+`F_{,z} = −2z r² − 2a² z`. On the root, `ρ² − a² = r² − a² z²/r²`, so `F_{,r} = 2 D / r`, and
+
+    ∂_x r = x r³ / D,    ∂_y r = y r³ / D,    ∂_z r = z r (r² + a²) / D.
+
+(For `a = 0`: `∂_i r = x_i / r`.)
+
+**`∂_i f`.** `f = 2M r³ / D` gives, with `∂_i D = 4 r³ ∂_i r + 2 a² z δ_iz`,
+
+    ∂_i f = f [ 3 ∂_i r / r − (4 r³ ∂_i r + 2 a² z δ_iz) / D ].
+
+**`∂_j l_μ`.** `l_t = 1` is constant. From `l_x = (r x + a y)/q` and `l_y = (r y − a x)/q` with `∂_j q = 2r ∂_j r`:
+
+    ∂_j l_x = (x ∂_j r + r δ_jx + a δ_jy − 2 r l_x ∂_j r) / q,
+    ∂_j l_y = (y ∂_j r + r δ_jy − a δ_jx − 2 r l_y ∂_j r) / q,
+    ∂_j l_z = δ_jz / r − z ∂_j r / r².
+
+Since `l^i = l_i` and `l^t = −1`, `∂_j l^i = ∂_j l_i` and `∂_j l^t = 0`.
+
+**Metric.** `∂_α g_{μν} = ∂_α f l_μ l_ν + f (∂_α l_μ l_ν + l_μ ∂_α l_ν)`, and `∂_α g^{μν}` is the same with `l^μ`
+and an overall minus sign.
+
+At `r = 0` (the disk) all derivatives are returned as zero, consistent with `f = 0` there (§ "Behaviour at
+r = 0"). The disk is a branch surface of `r(x, y, z)`, across which `∂_z f` is discontinuous.
+
+**Validation.** Richardson-extrapolated central differences (`O(h⁴)`, `h = 10⁻³ r`) agree with every analytic
+derivative to `10⁻⁹` of the natural scale. Also checked: `∂g^{μν} = −g^{μρ} ∂g_{ρσ} g^{σν}`. A deliberately
+introduced sign error in `∂l_y` is caught by all three derivative tests (mutation check during WP-02).
+
+## Christoffel symbols
+
+Code: `crates/gravography-physics/src/connection.rs`.
+
+    Γ_{ναβ} = ½ (∂_α g_{νβ} + ∂_β g_{να} − ∂_ν g_{αβ}),     Γ^μ_{αβ} = g^{μν} Γ_{ναβ}.
+
+Tested: symmetry in `αβ`; metric compatibility `∂_γ g_{αβ} = Γ^λ_{γα} g_{λβ} + Γ^λ_{γβ} g_{αλ}`; the acceleration
+`M / (r² sqrt(1 − 2M/r))` of a Schwarzschild static observer; and agreement with the Hamiltonian flow (below).
+Used for observer transport (WP-04). Rays use the Hamiltonian form.
+
+## Hamiltonian right-hand side
+
+Code: `crates/gravography-physics/src/geodesic.rs`.
+
+With `g^{μν} = η^{μν} − f l^μ l^ν` and `(l·p) = l^μ p_μ = −p_t + l_x p_x + l_y p_y + l_z p_z`:
+
+    H        = ½ [ η^{μν} p_μ p_ν − f (l·p)² ],
+    dx^μ/dλ  = ∂H/∂p_μ  = η^{μν} p_ν − f (l·p) l^μ,
+    dp_μ/dλ  = −∂H/∂x^μ = ½ ∂_μ f (l·p)² + f (l·p) (∂_μ l^ν) p_ν.
+
+This needs only the field gradients (3 + 3 + 9 numbers), never a rank-3 tensor, so it is the form to port to
+WGSL. `dp_t/dλ = 0` holds exactly, because `∂_t f = ∂_t l = 0`.
+
+Tested against: the tensor form `−½ ∂_μ g^{αβ} p_α p_β`; finite differences of `H` itself (independent of the
+analytic derivatives); and the geodesic equation. With `u^μ = g^{μν} p_ν`,
+`du^μ/dλ = (∂_α g^{μν}) u^α p_ν + g^{μν} ṗ_ν` must equal `−Γ^μ_{αβ} u^α u^β`.
+
+## Conserved quantities
+
+Code: `crates/gravography-physics/src/invariants.rs`.
+
+- `E = −p_t`. `∂_t` is the same Killing field in KS and BL, because `t_KS − t_BL` depends on `r` only.
+- `L_z = x p_y − y p_x`. At fixed `(t, r, θ)` the Killing field `∂_φ̃` is `∂x/∂φ̃ ∂_x + ∂y/∂φ̃ ∂_y = −y ∂_x + x ∂_y`.
+  BL `φ` and `φ̃` differ by a function of `r`, so `p_φ` (BL) `= p_φ̃ = L_z`.
+- `H`, with `μ² = −2H` (`0` for photons, `1` for unit-mass particles).
+- Carter `Q = p_θ² + cos²θ (a² (μ² − E²) + L_z² / sin²θ)` (Carter 1968; Bardeen 1973).
+
+### Carter constant in Cartesian form
+
+`p_θ` is the same in BL and ingoing KS spheroidal coordinates (the coordinates differ only by functions of `r`).
+From `x = sinθ (r cosφ̃ − a sinφ̃)`, `y = sinθ (r sinφ̃ + a cosφ̃)`, `z = r cosθ` at fixed `r, φ̃`:
+`∂x/∂θ = x cotθ`, `∂y/∂θ = y cotθ`, `∂z/∂θ = −r sinθ`, so
+
+    p_θ = cotθ (x p_x + y p_y) − r sinθ p_z.
+
+Taken alone, this and `L_z²/sin²θ` are singular on the axis. The combination is not. With the Lagrange identity
+`(x p_y − y p_x)² + (x p_x + y p_y)² = (x² + y²)(p_x² + p_y²)` and `x² + y² = sin²θ (r² + a²)`:
+
+    p_θ² + cot²θ L_z² = cos²θ (r² + a²)(p_x² + p_y²) − 2 z (x p_x + y p_y) p_z + r² sin²θ p_z²,
+
+with `cos²θ = z²/r²` and `sin²θ = 1 − cos²θ`. `Q` is this plus `cos²θ a² (μ² − E²)`. It is finite everywhere except
+`r = 0`.
+
+**Validation.** Agreement with the textbook BL formula, using `p_BL = Jᵀ p_KS`. For `a = 0`, `Q + L_z² = |x × p|²`.
+Bardeen's spherical-photon-orbit constants `ξ = L_z/E` and `η = Q/E²` (Appendix A) give a null BL momentum with
+`p_r = 0` that maps back to the same `ξ, η`. The Poisson brackets with `H` vanish: `dH/dλ`, `dE/dλ`,
+`dL_z/dλ` and `dQ/dλ` along the Hamiltonian vector field are zero to finite-difference accuracy (property test,
+also run with 10⁶ cases).
+
 ## Sections (to be written)
 
-- Analytic derivatives of `g^{μν}`, Christoffel symbols — WP-02
-- Conserved quantities `E`, `L_z`, Carter `Q` (Cartesian → spheroidal Jacobian) — WP-02
 - Ray initial conditions, termination and classification — WP-03
 - Observer dynamics and Fermi–Walker transport — WP-04
 - Colour pipeline and sky representation — WP-05
