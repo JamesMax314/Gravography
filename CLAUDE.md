@@ -54,6 +54,8 @@ stopped and what remains, then stop and tell the user. If a WP is too large, pro
   (e.g. `physics: add analytic inverse-metric derivatives`). No CI is used, so run the checks yourself before
   committing.
 - Never commit generated output (`target/`, screenshots, baked sky caches). Keep them gitignored.
+  Exception (approved by the user, 2026-10-30): the few curated README images in `docs/images/`. Keep them small
+  (compressed JPEG, under ~400 KB each) and regenerate them only when the rendering visibly changes.
 - End commit messages with the attribution trailer the user's environment specifies (if any).
 
 ## 4. Testing requirements (mandatory)

@@ -22,6 +22,20 @@ Written in Rust with `wgpu`; macOS (Apple Silicon) is the primary platform.
 See `docs/PRD.md` for the specification, `docs/physics.md` for derivations and validation, and
 `docs/progress_report.md` for the development log.
 
+## Screenshots
+
+| | |
+|---|---|
+| ![Kerr hole, a = 0.99, seen edge-on](docs/images/kerr_edge_on.jpg) | ![Inside a Schwarzschild horizon](docs/images/inside_horizon.jpg) |
+| **Kerr, a = 0.99, edge-on** (`kerr_edge_on.toml`): the shadow is flattened on the side whose rotation approaches the camera, and the star field is lensed asymmetrically. | **Inside the horizon** (`inside_horizon.toml`): free fall at r = 1.2 M. The whole sky is blueshifted, brightest at the shadow edge. |
+| ![360° panorama around a = 0.9](docs/images/kerr_panorama.jpg) | ![Fast observer, near-infrared false colour](docs/images/fast_observer_infrared.jpg) |
+| **360° equirectangular view** (`kerr_panorama.toml`): hovering at r = 8 M around a = 0.9. The galactic band wraps as a sinusoid. | **0.9 c past the hole, near-infrared false colour** (`fast_observer_infrared.toml`): aberration crowds the sky forward. Hue follows the Doppler shift, from red behind to blue-white ahead. |
+| ![Schwarzschild hole from 50 M](docs/images/schwarzschild_far.jpg) | ![The interactive viewer](docs/images/viewer.jpg) |
+| **Schwarzschild from r = 50 M** (`schwarzschild_far.toml`): shadow, photon ring, and the Einstein ring of the galactic band. | **The viewer:** settings panel (flight, presets, spacetime, band, effects, render, bookmarks and paths) and the HUD. |
+
+All images are rendered by Gravography itself: `render --backend gpu --samples 16` on the example scenes, and a
+`--smoke-test` window capture.
+
 ## Building
 
 ```bash
