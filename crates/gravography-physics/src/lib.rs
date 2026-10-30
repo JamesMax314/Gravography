@@ -9,15 +9,19 @@
 
 pub mod boyer_lindquist;
 pub mod connection;
+pub mod distant;
 pub mod error;
 pub mod geodesic;
 pub mod invariants;
 pub mod kerr;
 pub mod kerr_schild;
 pub mod linalg;
+pub mod ode;
+pub mod ray;
 pub mod scalar;
 #[cfg(test)]
 mod test_util;
+pub mod tetrad;
 
 pub use connection::{Christoffel, ks_christoffel};
 pub use error::PhysicsError;
@@ -28,4 +32,6 @@ pub use kerr_schild::{
     ks_g_up, ks_radius,
 };
 pub use linalg::{Mat4, Vec4};
+pub use ray::{RayResult, RayStatus, TraceParams, camera_ray_momentum, sky_frequency_shift, trace_ray};
 pub use scalar::Real;
+pub use tetrad::Tetrad;

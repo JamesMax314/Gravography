@@ -19,4 +19,7 @@ pub enum PhysicsError {
     /// (e.g. on the spin axis or a horizon in Boyer–Lindquist coordinates).
     #[error("coordinate transform is singular at this point: {0}")]
     CoordinateSingularity(&'static str),
+    /// No ray exists with the requested parameters at the requested place.
+    #[error("no such ray: {0}")]
+    NoSuchRay(&'static str),
 }
