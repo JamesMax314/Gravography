@@ -590,6 +590,8 @@ up to rounding:
 | `shade.wgsl` | `CpuRenderer::footprint` (neighbour form) + `Projection::pixel_solid_angle`; accumulation |
 | `tonemap.wgsl` | `tonemap::{aces_fitted, reinhard_extended, to_srgb8}`, `srgb_encode` |
 | `debug.wgsl` | FR-R6 debug views (no CPU counterpart) |
+| `tonemap_ops.wgsl` | `tonemap::{aces_fitted, reinhard_extended}`, `ToneMap::apply` (`tone_map_accum`), `srgb_encode` |
+| `present.wgsl` | viewer present pass: accumulation buffer → tone map → window (nearest, stretched; sRGB-encoded in the shader for non-sRGB targets) |
 | `test_rays.wgsl` | parity entry points (`trace_rk4_main`, `trace_dopri5_main`, `eval_rhs_main`) |
 
 Modules are concatenated in that order (`gpu/shader.rs`); naga validates the result in a unit test without a GPU.

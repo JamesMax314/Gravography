@@ -36,13 +36,27 @@ pub fn settings_panel(ui: &mut egui::Ui, settings: &mut ViewSettings, status: &S
     ui.separator();
 
     ui.label("Render");
-    ui.add(egui::Slider::new(&mut settings.samples, 1..=MAX_SAMPLE_TARGET).text("samples").logarithmic(true));
-    ui.add(egui::Slider::new(&mut settings.render_scale, RENDER_SCALE_RANGE.0..=RENDER_SCALE_RANGE.1).text("render scale"));
+    ui.add(
+        egui::Slider::new(&mut settings.samples, 1..=MAX_SAMPLE_TARGET)
+            .text("samples")
+            .logarithmic(true),
+    );
+    ui.add(
+        egui::Slider::new(
+            &mut settings.render_scale,
+            RENDER_SCALE_RANGE.0..=RENDER_SCALE_RANGE.1,
+        )
+        .text("render scale"),
+    );
     ui.separator();
 
     ui.label("Exposure");
     ui.checkbox(&mut settings.exposure.auto, "auto exposure");
-    let label = if settings.exposure.auto { "EV compensation" } else { "EV" };
+    let label = if settings.exposure.auto {
+        "EV compensation"
+    } else {
+        "EV"
+    };
     ui.add(egui::Slider::new(&mut settings.exposure.ev, -12.0..=12.0).text(label));
     egui::ComboBox::from_label("tone map")
         .selected_text(match settings.tone_map {
@@ -60,7 +74,10 @@ pub fn settings_panel(ui: &mut egui::Ui, settings: &mut ViewSettings, status: &S
     }
     ui.separator();
     ui.label(format!("{:.1} fps", status.fps));
-    ui.label(format!("render {}×{}", status.render_size.0, status.render_size.1));
+    ui.label(format!(
+        "render {}×{}",
+        status.render_size.0, status.render_size.1
+    ));
     ui.label(format!("samples {}/{}", status.samples.0, status.samples.1));
     ui.label(format!("exposure scale {:.3e}", status.exposure_scale));
     if !status.message.is_empty() {

@@ -7,7 +7,8 @@ Written in Rust with `wgpu`; macOS (Apple Silicon) is the primary platform.
 **Status:** early development. The CPU physics (geodesics, observers), the sky model (colour science, star
 field, cube-map baking) and a CPU f64 reference renderer with a headless `render` command are implemented and
 tested. The GPU backend renders the same images as the CPU reference (PRD tests 15 and 16) in about a second,
-with FR-R6 debug views. The interactive viewer is not built yet. See `docs/PRD.md` for the specification and
+with FR-R6 debug views. A first interactive viewer (fixed camera, progressive refinement, settings panel,
+screenshots) runs on macOS; flight controls arrive in WP-11. See `docs/PRD.md` for the specification and
 `docs/progress_report.md` for progress.
 
 ## Building
@@ -30,6 +31,20 @@ machine without a GPU adapter they print `SKIPPED …` and pass. Run them with `
 parity report.
 
 Requires Rust 1.99 or newer (edition 2024); the pinned version is in `rust-toolchain.toml`.
+
+## Viewer
+
+```bash
+cargo run --release -p gravography-app                                   # default scene (static observer, r = 30 M)
+cargo run --release -p gravography-app -- --scene scenes/kerr_edge_on.toml
+```
+
+The view refines progressively (one jittered sample per frame up to the sample target, then it idles). The left
+panel sets the sample target, the render scale (internal resolution as a fraction of the window; default 0.5),
+auto/manual exposure with EV and the tone-map operator. **P** (or the panel button) saves a screenshot rendered to
+convergence at the full window resolution: a tone-mapped PNG and a linear HDR EXR in `screenshots/` (change with
+`--screenshot-dir`). **Esc** quits. `--smoke-test` runs a scripted check (render, screenshot, resize, render,
+screenshot, exit) for automated verification.
 
 ## Headless rendering
 

@@ -18,6 +18,9 @@ mod tests {
         let (a, b) = screenshot_paths(Path::new("shots"), 1_700_000_000, 7);
         assert_eq!(a, Path::new("shots/gravography-1700000000-007.png"));
         assert_eq!(b, Path::new("shots/gravography-1700000000-007.exr"));
-        assert_ne!(screenshot_paths(Path::new("s"), 1, 1).0, screenshot_paths(Path::new("s"), 1, 2).0);
+        assert_ne!(
+            screenshot_paths(Path::new("s"), 1, 1).0,
+            screenshot_paths(Path::new("s"), 1, 2).0
+        );
     }
 }
