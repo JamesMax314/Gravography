@@ -29,6 +29,8 @@ pub struct ViewSettings {
     pub effects: Effects,
     /// Projection (FR-R2).
     pub projection: Projection,
+    /// Observing band (`docs/PRD.md` §6.1).
+    pub band: gravography_render::scene::BandKind,
 }
 
 /// Field-of-view range of the rectilinear projection in the panel (`docs/PRD.md` FR-R2).
@@ -53,6 +55,7 @@ impl ViewSettings {
             exposure: scene.render.exposure,
             effects: scene.render.effects,
             projection: scene.camera.projection,
+            band: scene.sky.band,
         }
     }
 
@@ -63,6 +66,7 @@ impl ViewSettings {
             || self.render_scale.to_bits() != new.render_scale.to_bits()
             || self.effects != new.effects
             || self.projection != new.projection
+            || self.band != new.band
     }
 }
 

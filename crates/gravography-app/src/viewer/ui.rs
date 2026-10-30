@@ -123,6 +123,13 @@ pub fn settings_panel(
             );
             ui.small("Changing spin keeps the position and velocity; invalid states reset.");
         });
+        egui::ComboBox::from_label("band")
+            .selected_text(settings.band.label())
+            .show_ui(ui, |ui| {
+                for b in gravography_render::scene::BandKind::ALL {
+                    ui.selectable_value(&mut settings.band, b, b.label());
+                }
+            });
         ui.collapsing("Effects", |ui| {
             ui.checkbox(&mut settings.effects.lensing, "gravitational lensing");
             ui.checkbox(&mut settings.effects.frequency_shift, "frequency shift");

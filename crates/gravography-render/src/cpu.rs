@@ -10,7 +10,6 @@
 use gravography_physics::linalg::Mat4;
 use gravography_physics::ray::escape_direction;
 use gravography_physics::{RayStatus, TraceParams, camera_ray_momentum, trace_ray};
-use gravography_sky::colour::{mat3_vec, xyz_to_linear_srgb_matrix};
 use rayon::prelude::*;
 
 use crate::frame::FrameParams;
@@ -230,7 +229,7 @@ impl<'a> CpuRenderer<'a> {
         let sr = pixel_sr / f64::from(self.frame.samples);
         let s = self.sky.shade(&d, sr, hit.g, &self.frame.effects);
         stats.lut_clamped += u64::from(s.lut_clamped);
-        mat3_vec(&xyz_to_linear_srgb_matrix(), &s.xyz)
+        self.sky.to_rgb(&s.xyz)
     }
 
     /// Renders one row.
@@ -299,6 +298,7 @@ mod tests {
     use crate::tonemap::{Exposure, ToneMap};
     use approx::assert_relative_eq;
     use gravography_physics::{Kerr, Tetrad};
+    use gravography_sky::colour::{mat3_vec, xyz_to_linear_srgb_matrix};
     use gravography_sky::cubemap::CubeLevel;
     use gravography_sky::{BlackbodyLut, CubeMap};
 

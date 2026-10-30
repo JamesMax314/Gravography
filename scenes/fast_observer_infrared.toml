@@ -1,0 +1,29 @@
+# The fast observer of fast_observer.toml (r = 10 M, β = 0.9 tangentially) as a full-sphere panorama in the
+# near-infrared false-colour band (J, H, K → blue, green, red; neutral grey = a 1756 K blackbody).
+# Expect: aberration crowds the sky toward the direction of motion (image centre) and stretches it behind
+# (left/right edges); the shadow sits ≈ 16°–42° right of centre. Hue follows the frequency shift g: ahead
+# (g up to ≈ 4.9) the stars are hotter-looking, blue-white and bright; behind (g down to ≈ 0.2) they turn red and
+# faint. Typical K/M stars (3000–4500 K) look bluish even at rest, because they are hotter than the 1756 K reference.
+
+[spacetime]
+spin = 0.0
+
+[observer]
+preset = "hover"
+r = 10.0
+theta_deg = 90.0
+phi_deg = 0.0
+boost = [0.0, 0.9, 0.0]
+look = { yaw_deg = 90.0 }
+
+[camera]
+width = 960
+height = 480
+projection = { kind = "equirectangular" }
+samples = 4
+
+[sky]
+band = "near_infrared"
+
+[render]
+exposure = { auto = true, ev = -5.0 }

@@ -160,7 +160,7 @@ look = { yaw_deg = 0.0, pitch_deg = 0.0, roll_deg = 0.0 }
 [camera]
 width = 960
 height = 540
-projection = { kind = "rectilinear", fov_deg = 60.0 }   # vertical field of view, 0 < fov < 180
+projection = { kind = "rectilinear", fov_deg = 60.0 }   # or { kind = "equirectangular" } (360°, use 2:1)
 samples = 1                 # samples per pixel (jittered)
 
 [sky]
@@ -169,6 +169,7 @@ star_count = 200000
 face_size = 2048            # cube-map face size, power of two ≤ 8192
 diffuse_band = true
 galactic_normal = [0.0, 0.8660254037844386, 0.5]
+band = "human_vision"       # "human_vision" | "near_infrared" | "near_ultraviolet" | "soft_xray"
 
 [render]
 exposure = { auto = true, ev = 0.0 }
@@ -187,11 +188,12 @@ rtol = 1e-10                # CPU integrator relative tolerance, (0, 1e-3]
 | `boost` | Lorentz boost of the camera relative to the preset observer, as a velocity in the preset's (forward, left, up) frame. Positions and the preset's motion are unchanged; only the camera frame moves. |
 | `look` | Look rotation relative to the default view: `yaw_deg` (positive turns left), then `pitch_deg` (positive looks up), then `roll_deg` (about the view direction). |
 | `camera` | Image size (`width`, `height`), `projection` and `samples` per pixel. |
-| `projection` | `kind`: `"rectilinear"` (pinhole) with vertical field of view `fov_deg` (the equirectangular projection follows in WP-13). |
+| `projection` | `kind`: `"rectilinear"` (pinhole) with vertical field of view `fov_deg` (0 < fov < 180), or `"equirectangular"`: the full sphere, centre = forward, longitude across (+180° at the left edge), latitude down (use a 2:1 image for square pixels). |
 | `samples` | Jittered samples per pixel (R2 sequence; 1 = pixel centres). |
 | `sky` | Procedural sky: catalogue `seed`, `star_count`, cube-map `face_size`, `diffuse_band` (Milky-Way-like glow) and the `galactic_normal` (pole of the galactic plane, KS axes). |
+| `band` | Observing band (`docs/PRD.md` §6.1). `"human_vision"`: CIE 1931 colour. The false-colour composites each show three wavelength windows as blue, green and red: `"near_infrared"` (J, H, K: 1.1–1.4, 1.5–1.8, 2.0–2.4 µm), `"near_ultraviolet"` (200–260, 260–320, 320–380 nm) and `"soft_xray"` (2–8, 1–2, 0.3–1 keV). A blackbody peaking in the band (1756 K, 9990 K, 3.6 MK) shows neutral grey. Hotter or blueshifted light looks bluer, cooler or redshifted light redder. Ordinary stars are dark in X-rays unless blueshifted by `g ≳ 50`. The star field itself is the same in every band. |
 | `render` | Display and accuracy settings. |
-| `exposure` | `auto` = true: the log-average luminance of the lit pixels maps to 0.18, then `ev` stops of compensation. `auto` = false: absolute, `2^ev` divided by the luminance of a 5772 K blackbody filling the pixel. |
+| `exposure` | `auto` = true: the log-average luminance of the lit pixels maps to 0.18, then `ev` stops of compensation. `auto` = false: absolute, `2^ev` divided by the luminance of the band's reference blackbody filling the pixel (5772 K for human vision). |
 | `tone_map` | `"aces"` (filmic, default) or `"reinhard"` (extended Reinhard on luminance, white point 16; hue-preserving). |
 | `effects` | Pedagogical toggles (`docs/PRD.md` §6.4): `lensing` (off: straight rays, aberration kept), `frequency_shift` (off: `g = 1`), `beaming` (off: colour shifts but bolometric brightness stays at the `g = 1` value). |
 | `rtol` | Relative tolerance of the CPU ray integrator (absolute tolerance is `rtol/100`). |

@@ -513,7 +513,7 @@ impl Gfx {
             gpu: ctx.describe(),
             ..Status::default()
         };
-        Ok(Self {
+        let mut gfx = Self {
             window,
             surface,
             config,
@@ -558,7 +558,12 @@ impl Gfx {
             path_dir: opts.path_dir.clone(),
             pending_refresh: true,
             ctx,
-        })
+        };
+        if gfx.settings.band != opts.scene.sky.band {
+            // Started from a bookmark recorded in another band.
+            gfx.apply_band();
+        }
+        Ok(gfx)
     }
 
     /// Reconfigures the surface at once (cheap) but defers the new internal resolution until the size has been
@@ -758,6 +763,20 @@ impl Gfx {
         self.flight.update(dt, &self.keys)
     }
 
+    /// Uploads the table of the selected band and its exposure reference (the cube map stays).
+    fn apply_band(&mut self) {
+        let lut = self.settings.band.lut();
+        match self.sky.set_lut(&self.ctx, &lut) {
+            Ok(()) => {
+                self.reference_luminance = lut.reference_luminance();
+                self.log_average = None;
+                self.status.message = format!("band: {}", lut.name);
+            }
+            Err(e) => self.status.message = format!("switching band failed: {e}"),
+        }
+        self.restart(true);
+    }
+
     /// Re-reads the bookmark and path directories.
     fn refresh_files(&mut self, opts: &ViewerOptions) {
         let stem = |p: &PathBuf| {
@@ -828,7 +847,7 @@ impl Gfx {
             self.recorder = None;
             self.playback = None;
             self.editor = *self.flight.preset();
-            self.restart(true);
+            self.apply_band();
         }
         if actions.start_recording && self.playback.is_none() {
             self.recorder = Some(Recorder::start(
@@ -935,7 +954,11 @@ impl Gfx {
         self.egui_state
             .handle_platform_output(&self.window, out.platform_output);
         let reset = self.settings.resets_accumulation(&settings);
+        let band_changed = self.settings.band != settings.band;
         self.settings = settings;
+        if band_changed {
+            self.apply_band();
+        }
         if reset {
             self.restart(true);
         }

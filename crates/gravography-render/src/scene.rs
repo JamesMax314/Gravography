@@ -5,7 +5,7 @@
 use std::path::Path;
 
 use gravography_physics::{Kerr, Observer, ObserverParams, TraceParams};
-use gravography_sky::{DiffuseBandParams, SkyParams, StarParams};
+use gravography_sky::{Band, BlackbodyLut, DiffuseBandParams, SkyParams, StarParams};
 use serde::{Deserialize, Serialize};
 
 use crate::RenderError;
@@ -202,6 +202,56 @@ impl Default for CameraSpec {
     }
 }
 
+/// Observing band (`docs/PRD.md` §6.1): human vision or a false-colour composite.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BandKind {
+    /// CIE 1931 human vision.
+    #[default]
+    HumanVision,
+    /// J, H, K (1.1–2.4 µm) as blue, green, red.
+    NearInfrared,
+    /// 200–380 nm in three windows as blue, green, red.
+    NearUltraviolet,
+    /// 2–8, 1–2, 0.3–1 keV as blue, green, red.
+    SoftXray,
+}
+
+impl BandKind {
+    /// Every band, in UI order.
+    pub const ALL: [Self; 4] = [
+        Self::HumanVision,
+        Self::NearInfrared,
+        Self::NearUltraviolet,
+        Self::SoftXray,
+    ];
+
+    /// The band definition.
+    pub fn band(self) -> Band {
+        match self {
+            Self::HumanVision => Band::human_vision(),
+            Self::NearInfrared => Band::near_infrared(),
+            Self::NearUltraviolet => Band::near_ultraviolet(),
+            Self::SoftXray => Band::soft_xray(),
+        }
+    }
+
+    /// Its blackbody table (default size and range).
+    pub fn lut(self) -> BlackbodyLut {
+        BlackbodyLut::for_band(&self.band())
+    }
+
+    /// Short UI name.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::HumanVision => "human vision",
+            Self::NearInfrared => "near infrared (false colour)",
+            Self::NearUltraviolet => "near ultraviolet (false colour)",
+            Self::SoftXray => "soft X-ray (false colour)",
+        }
+    }
+}
+
 /// `[sky]`.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -216,6 +266,8 @@ pub struct SkySpec {
     pub diffuse_band: bool,
     /// Galactic pole (KS Cartesian axes; need not be normalised).
     pub galactic_normal: [f64; 3],
+    /// Observing band: `"human_vision"` (default), `"near_infrared"`, `"near_ultraviolet"` or `"soft_xray"`.
+    pub band: BandKind,
 }
 
 impl Default for SkySpec {
@@ -228,6 +280,7 @@ impl Default for SkySpec {
             face_size: p.face_size,
             diffuse_band: p.diffuse.is_some(),
             galactic_normal: p.galactic_normal,
+            band: BandKind::HumanVision,
         }
     }
 }

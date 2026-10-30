@@ -134,7 +134,8 @@ fn load_sky(scene: &Scene, no_cache: bool) -> Result<Sky> {
         if hit { "loaded from cache" } else { "baked" },
         t0.elapsed().as_secs_f64()
     );
-    Ok(Sky::new(cube, lut))
+    // The star field is defined in human vision (flux → solid angle); the band only changes the shading table.
+    Ok(Sky::new(cube, scene.sky.band.lut()))
 }
 
 fn view(args: &ViewArgs) -> Result<()> {
