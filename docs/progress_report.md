@@ -6,17 +6,21 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
 
 ## Current state
 
-- WP-00 to WP-04 done. `gravography-physics` has:
-  - the full single-ray CPU pipeline: Kerr–Schild metric and derivatives, Hamiltonian RHS, invariants,
-    BL ↔ KS transforms, radii, tetrads, DOPRI5/RK4, `trace_ray` and camera rays with `g = 1/p_t`;
-  - observer dynamics (WP-04): `Observer` with thrust, a Fermi–Walker transported tetrad, the presets hover,
-    ZAMO, circular orbit, radial infall and free, regions, inner/outer limits, spin change, look rotation
-    (`Tetrad::rotated`) and g-force conversion.
-- PRD §9 tests 1–12 pass. No sky or rendering yet.
-- **Next work package:** WP-05 — Colour & sky.
-- Toolchain: rustup, pinned to stable **1.99.1** (`rust-toolchain.toml`). Plain `cargo fmt/clippy/test`
-  work; the old `PATH=/opt/homebrew/bin` workaround is obsolete (Homebrew Rust is uninstalled).
-- Open questions for the user: none.
+- WP-00 to WP-05 done.
+  - `gravography-physics`: Kerr–Schild metric and derivatives, Hamiltonian ray tracing (DOPRI5/RK4, termination,
+    escape direction, `g = 1/p_t`), BL ↔ KS, radii, invariants, and observer dynamics (thrust, Fermi–Walker
+    transport, presets, limits, spin change).
+  - `gravography-sky` (WP-05): bundled CIE 1931 2° table, Planck spectra, band abstraction, blackbody LUT
+    (`[ln S, x, y]`, 4096 entries, 100 K–10⁷ K), XYZ → sRGB, deterministic star catalogue (SplitMix64), diffuse
+    galactic band, cube map `(w, w·T)` with exact texel solid angles and a flux-conserving mip chain, CPU
+    trilinear sampling, and an on-disk cache.
+- PRD §9 tests 1–14 pass. No renderer yet.
+- Property tests now use a fixed seed (`.cargo/config.toml`), so `cargo test` is deterministic.
+- **Next work package:** WP-06 — CPU reference renderer + headless CLI.
+- Toolchain: rustup, Rust **1.99.1** (`rust-toolchain.toml`).
+- Open questions for the user: the CIE table is CC BY-SA 4.0 (the CIE's licence for its open dataset). It is
+  redistributable with attribution (PRD PL-6), but please confirm you are happy shipping share-alike data alongside
+  MIT/Apache code (see `THIRD_PARTY.md`).
 
 ---
 
@@ -29,7 +33,7 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
 | WP-02 | Derivatives, Hamiltonian, invariants | done | `wp-02` |
 | WP-03 | CPU ray tracing | done | `wp-03` |
 | WP-04 | Observer | done | `wp-04` |
-| WP-05 | Colour & sky | not started | |
+| WP-05 | Colour & sky | done | `wp-05` |
 | WP-06 | CPU reference renderer + headless CLI | not started | |
 | WP-07 | GPU foundation | not started | |
 | WP-08 | GPU ray tracer | not started | |
@@ -72,6 +76,112 @@ Template for each entry (copy above the previous entry):
 **Notes for the next agent**
 -
 -->
+
+## WP-05 — Colour & sky — 2026-10-30 — COMPLETE
+
+**Summary**
+- **Baseline fix first:** `main` was red at the start of the session.
+  - `kerr::tests::isco_satisfies_marginal_stability` failed for a random proptest seed (a ≈ 1.3e-5, residual
+    1.05e-10 > 1e-10).
+  - Cause: `3 − Z₁` in the BPT ISCO formula cancels catastrophically as χ → 0.
+  - Fix: compute it as `(p + m)(p − m)²`, with `p − m = 2χ/(p² + pm + m²)`.
+  - Regression test `isco_is_accurate_for_tiny_spin`, written first; it reproduced the failure.
+  - `.cargo/config.toml` now sets `PROPTEST_RNG_SEED` (CLAUDE.md §4 requires fixed seeds). An existing
+    environment variable overrides it.
+  - `proptest-regressions/` is gitignored (redundant with fixed seeds).
+- `gravography-sky`:
+  - `cmf` — bundled CIE table, parsed once;
+  - `planck` — `B_λ`, `B_ν`, SI constants;
+  - `band` — `Band::human_vision`, `blackbody_response`, `BlackbodyLut`;
+  - `colour` — chromaticity, sRGB matrix derivation, transfer function;
+  - `rng` — SplitMix64;
+  - `catalogue` — `StarParams`, `generate`, galactic frame;
+  - `diffuse` — value-noise fBm band;
+  - `cubemap` — face convention, texel solid angle, `CubeLevel`/`CubeMap`, mips, sampling;
+  - `bake` — `SkyParams`, splatting, `bake_sky`;
+  - `cache` — `bake_sky_cached`.
+- `examples/sky_preview.rs` renders the baked sky as an equirectangular PPM (no black hole).
+- `assets/cie/` (CSV + CIE metadata), `THIRD_PARTY.md`, `docs/physics.md` § "Colour pipeline and sky", README.
+
+**Key files/modules**
+- `crates/gravography-sky/src/band.rs`: band response and the LUT; the GPU texture layout is documented on
+  `BlackbodyLut`.
+- `crates/gravography-sky/src/cubemap.rs`: face/uv convention table (must match WGSL cube sampling in WP-09).
+- `crates/gravography-sky/src/bake.rs`, `catalogue.rs`, `diffuse.rs`: the sky content.
+- `crates/gravography-sky/tests/sky_validation.rs`: production-size bake (ignored; run in release).
+- `crates/gravography-physics/src/kerr.rs`: ISCO fix. `.cargo/config.toml`: proptest seed.
+
+**Decisions & deviations**
+- **CIE data licence:** CC BY-SA 4.0, verified from the CIE metadata file; the MD5 matches. It is bundled
+  unmodified with attribution. Flagged to the user (Current state).
+- **LUT entries are `[ln S, x, y, 0]`, not raw XYZ.** At 100 K XYZ ≈ e^{−360} underflows f32. Interpolating
+  `ln S` and chromaticity in `ln T` is smooth. 4096 entries rather than the PRD minimum of 1024, so the error stays
+  ≤ 5e-4 at 100 K.
+- **Own PRNG (SplitMix64), not `rand`:** catalogues are bit-stable across dependency updates (NF-3). It is checked
+  against Vigna's reference outputs.
+- **Star brightness is defined by flux in band channel 1 (`Y`).** `Ω_* = F/Y_BB(T)` follows, so a star's
+  apparent brightness doesn't depend on its colour. With the defaults, `Σ Ω_* ≈ 0.13 sr` (mean `w ≈ 0.01`).
+- **Diffuse band amplitude 5e-3, chosen by eye with the preview** (4e-4 was invisible, 1e-2 dominated). This is
+  a tuning knob for WP-06.
+- Cube-map texels are RG32F (`[f32; 2]`). A 2048² default is ≈ 270 MB with mips. RG16F would need a rescaled
+  `w`; left to WP-12.
+- Star splats and mip filtering do not cross face edges (clamped). Flux is exact; there is < 1 texel position
+  error at seams.
+- Kernel = bilinear tent (2×2 texels), PRD "≈ 1–2 texels".
+- The cache directory is chosen by the caller (no `dirs` dependency yet; the app picks the platform cache dir in
+  WP-10).
+- Tolerance changes in new tests before commit:
+  - The Illuminant A reference was corrected to the published (0.44757, 0.40745); I had misremembered x as
+    0.44758. Its tolerance went 1e-5 → 2e-5: the published values are rounded to 5 decimals and computed on a 5 nm
+    grid. The measured difference is 1.1e-5.
+  - A value-noise continuity test started from the wrong point; that was a test bug.
+- New dependencies: `rayon` (parallel diffuse-band evaluation in the bake). Dev: `approx`, `proptest`.
+  `thiserror` for `SkyError`.
+
+**Tests**
+- 150 passed, 1 ignored (93 physics unit + 7 observer + 8 ray validation + 42 sky). The ignored production bake
+  passes in release.
+- Test 13: Planckian locus vs Kim et al. (US 7024034) at 10 temperatures 1700–25000 K, worst 1.5e-3 (bound 2e-3).
+  Illuminant A to 1.1e-5.
+- Test 14:
+  - Wien peak to 1e-7;
+  - Stefan–Boltzmann to 1e-9 (100 K–10⁷ K);
+  - `g³B_ν(ν/g, T) = B_ν(ν, gT)` and `g⁵B_λ(gλ, T) = B_λ(λ, gT)` (property test, 1e-12);
+  - band integral of the shifted spectrum equals the response at `gT` (1e-12);
+  - RJ and Wien limits.
+- LUT vs direct integration: Y < 5e-4, xy < 1e-5 over 100 K–10⁷ K. Clamping is flagged.
+- sRGB: D65 → (1, 1, 1), primaries, IEC matrix to < 5e-4, transfer function.
+- Catalogue: bit-identical for a seed; class fractions, flux power law and galactic concentration within 5σ;
+  unit directions.
+- Bake: **flux sum test** `Σ w Ω = Σ Ω_*` (and `Σ wTΩ`) to 1e-5 at every mip level (64² and 2048²/2·10⁵ stars);
+  diffuse band adds exactly its integral; a single star keeps its T and position; deterministic.
+- Cube map: Σ texel Ω = 4π; face/uv round trip; GL orientation spot checks; trilinear sampling; mips conserve flux.
+- Cache: round trip and hit; key changes with parameters; mismatched key or truncated file is a miss.
+
+**Visual checks**
+- `sky_preview` (1024² faces, equirectangular 2048×1024): orange K/M-dominated star field with sparse white/blue
+  hot stars. The galactic plane, tilted 60° from the spin axis, appears as a sinusoid. With amplitude 5e-3 the
+  diffuse band is a soft glow along it. The streaks at the image top and bottom are equirectangular pole
+  stretching, not a bake artefact.
+
+**Performance**
+- Default bake (2048² faces, 2·10⁵ stars, band, 12 mip levels): 1.46 s in release (M-series Mac). Cache reload
+  avoids it (NF-6 < 3 s).
+
+**Known issues / tech debt**
+- Equirectangular texture-sky mode (§6.5) and false-colour bands are WP-13; the `Band` struct is the extension
+  point (a display mapping still has to be added).
+- Mip filtering is the solid-angle-weighted mean; GPU hardware trilinear filtering of a level is a plain
+  bilinear mean. The difference is small and only near face corners.
+
+**Notes for the next agent**
+- WP-06 shading per pixel:
+  `[w, wT] = cube.sample_trilinear(escape_dir, lod)`; `T = wT/w`; `XYZ = w · lut.lookup(g·T).response`;
+  `rgb = colour::xyz_to_linear_srgb(XYZ)`; then exposure and tone map. `lod` comes from the ray-differential
+  footprint: `lod = ½ log2(Ω_pixel_on_sky / Ω_texel)`, `Ω_texel ≈ 4π/(6 n²)`. See `examples/sky_preview.rs` for
+  the whole chain without lensing.
+- Use a smaller `face_size` (e.g. 512–1024) for scenes/tests; the default 2048 costs ≈ 270 MB.
+- The escape direction from `trace_ray` is in KS Cartesian axes, the same axes as the cube map.
 
 ## WP-04 — Observer — 2026-10-30 — COMPLETE
 
