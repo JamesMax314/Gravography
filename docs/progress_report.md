@@ -20,8 +20,8 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
   Schwarzschild lens map.
 - **Next work package:** WP-07 — GPU foundation.
 - Toolchain: rustup, Rust **1.99.1** (`rust-toolchain.toml`).
+- The user approved shipping the CC BY-SA 4.0 CIE table (2026-10-30; see `THIRD_PARTY.md`).
 - Open questions for the user:
-  - The CIE table is CC BY-SA 4.0. Please confirm you are happy shipping it (see `THIRD_PARTY.md`).
   - The example scenes use auto exposure with −2 EV (−4 EV inside the horizon), chosen by eye. Adjust to taste.
 
 ---
