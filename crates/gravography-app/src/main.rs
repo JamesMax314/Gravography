@@ -1,4 +1,6 @@
-//! `gravography`: interactive black-hole viewer (WP-10) and headless `render` CLI (`docs/PRD.md` FR-X2).
+//! `gravography`: interactive black-hole viewer (`docs/PRD.md` §4.2) and headless `render` CLI (FR-X2).
+
+mod viewer;
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -16,10 +18,34 @@ use gravography_render::{
 use gravography_sky::{BlackbodyLut, bake_sky_cached};
 
 #[derive(Parser)]
-#[command(name = "gravography", version, about = "Real-time Kerr black-hole ray tracer")]
+#[command(
+    name = "gravography",
+    version,
+    about = "Real-time Kerr black-hole ray tracer",
+    args_conflicts_with_subcommands = true
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
+    #[command(flatten)]
+    view: ViewArgs,
+}
+
+/// Options of the interactive viewer (no subcommand).
+#[derive(clap::Args)]
+struct ViewArgs {
+    /// Scene file to open (default: the built-in default scene, a static observer at r = 30 M).
+    #[arg(long)]
+    scene: Option<PathBuf>,
+    /// Directory for screenshots (key P).
+    #[arg(long, default_value = "screenshots")]
+    screenshot_dir: PathBuf,
+    /// Scripted check: render, screenshot, resize the window, render, screenshot, exit.
+    #[arg(long)]
+    smoke_test: bool,
+    /// Do not read or write the baked-sky cache.
+    #[arg(long)]
+    no_cache: bool,
 }
 
 #[derive(Subcommand)]
@@ -76,16 +102,41 @@ struct RenderArgs {
 }
 
 fn main() -> Result<()> {
-    match Cli::parse().command {
+    let cli = Cli::parse();
+    match cli.command {
         Some(Command::Render(args)) => render(&args),
-        None => {
-            println!(
-                "gravography {}: the interactive viewer arrives in WP-10. Use `gravography render --help`.",
-                env!("CARGO_PKG_VERSION")
-            );
-            Ok(())
-        }
+        None => view(&cli.view),
     }
+}
+
+/// Bakes (or loads from the cache) the sky of `scene`, printing where it came from.
+fn load_sky(scene: &Scene, no_cache: bool) -> Result<Sky> {
+    let t0 = Instant::now();
+    let lut = BlackbodyLut::human_vision();
+    let cache = if no_cache { None } else { cache_dir() };
+    let (cube, hit) = bake_sky_cached(&scene.sky_params()?, &lut, cache.as_deref())?;
+    println!(
+        "sky: {} ({:.2} s)",
+        if hit { "loaded from cache" } else { "baked" },
+        t0.elapsed().as_secs_f64()
+    );
+    Ok(Sky::new(cube, lut))
+}
+
+fn view(args: &ViewArgs) -> Result<()> {
+    let scene = match &args.scene {
+        Some(p) => Scene::load(p).with_context(|| format!("loading {}", p.display()))?,
+        None => Scene::default(),
+    };
+    // Validate the camera before opening a window.
+    scene.frame()?;
+    let sky = load_sky(&scene, args.no_cache)?;
+    viewer::run(viewer::ViewerOptions {
+        scene,
+        sky,
+        screenshot_dir: args.screenshot_dir.clone(),
+        smoke_test: args.smoke_test,
+    })
 }
 
 /// Platform cache directory for baked skies: `~/Library/Caches/gravography` on macOS, otherwise
@@ -127,16 +178,7 @@ fn render(args: &RenderArgs) -> Result<()> {
         Backend::Cpu => None,
     };
 
-    let t0 = Instant::now();
-    let lut = BlackbodyLut::human_vision();
-    let cache = if args.no_cache { None } else { cache_dir() };
-    let (cube, hit) = bake_sky_cached(&scene.sky_params()?, &lut, cache.as_deref())?;
-    let sky = Sky::new(cube, lut);
-    println!(
-        "sky: {} ({:.2} s)",
-        if hit { "loaded from cache" } else { "baked" },
-        t0.elapsed().as_secs_f64()
-    );
+    let sky = load_sky(&scene, args.no_cache)?;
 
     let t1 = Instant::now();
     let (stats, scale) = if let Some(ctx) = &gpu {

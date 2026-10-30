@@ -4,3 +4,6 @@
 
 # proptest failure persistence (seeds are fixed in .cargo/config.toml, so these are redundant)
 proptest-regressions/
+
+# Viewer screenshots (FR-X1)
+/screenshots/

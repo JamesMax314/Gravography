@@ -10,6 +10,8 @@ pub struct GpuContext {
     pub queue: wgpu::Queue,
     /// Adapter description (name, backend, driver).
     pub adapter_info: wgpu::AdapterInfo,
+    /// The adapter (for surface capabilities).
+    pub adapter: wgpu::Adapter,
 }
 
 impl GpuContext {
@@ -29,18 +31,42 @@ impl GpuContext {
         let Ok(adapter) = pollster::block_on(instance.request_adapter(&options)) else {
             return Ok(None);
         };
+        Self::from_adapter(&adapter).map(Some)
+    }
+
+    /// Creates a device on an adapter that can present to `surface` (the viewer), created from `instance`.
+    ///
+    /// # Errors
+    /// [`RenderError::Gpu`] if no compatible adapter exists or the device cannot be created.
+    pub fn for_surface(instance: &wgpu::Instance, surface: &wgpu::Surface<'_>) -> Result<Self, RenderError> {
+        let options = wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: Some(surface),
+            ..Default::default()
+        };
+        let adapter = pollster::block_on(instance.request_adapter(&options))
+            .map_err(|e| RenderError::Gpu(format!("no adapter for the window surface: {e}")))?;
+        Self::from_adapter(&adapter)
+    }
+
+    /// Creates the device and queue on `adapter` with the adapter's own limits.
+    ///
+    /// # Errors
+    /// [`RenderError::Gpu`] if the device cannot be created.
+    pub fn from_adapter(adapter: &wgpu::Adapter) -> Result<Self, RenderError> {
         let desc = wgpu::DeviceDescriptor {
-            label: Some("gravography headless device"),
+            label: Some("gravography device"),
             required_limits: adapter.limits(),
             ..Default::default()
         };
         let (device, queue) = pollster::block_on(adapter.request_device(&desc))
             .map_err(|e| RenderError::Gpu(format!("device creation failed: {e}")))?;
-        Ok(Some(Self {
+        Ok(Self {
             device,
             queue,
             adapter_info: adapter.get_info(),
-        }))
+            adapter: adapter.clone(),
+        })
     }
 
     /// Creates a headless context for a test, or prints why the test is skipped (`CLAUDE.md` §4: GPU tests skip

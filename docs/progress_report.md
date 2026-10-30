@@ -6,7 +6,7 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
 
 ## Current state
 
-- WP-00 to WP-09 done.
+- WP-00 to WP-10 done.
   - `gravography-physics`: Kerr–Schild metric and derivatives, Hamiltonian ray tracing (DOPRI5/RK4, termination,
     escape direction, `g = 1/p_t`), BL ↔ KS, radii, invariants, observer dynamics, tetrad boosts (WP-06).
   - `gravography-sky`: CIE 1931 table, Planck spectra, blackbody LUT, XYZ → sRGB, deterministic star catalogue,
@@ -27,14 +27,16 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
     matrix, angular-error quantiles).
   - `gravography` binary: `gravography render --scene … --out …png|exr [--width --height --samples
     --backend cpu|gpu --debug status|shift|steps --no-cache]`. The GPU backend renders a 960×540×4 spp scene in
-    about 1 s (the CPU takes 35–75 s). The interactive viewer is not built yet.
+    about 1 s (the CPU takes 35–75 s). With no subcommand, `gravography` opens the viewer: progressive rendering
+    of a fixed camera, egui settings panel, resizing, P for PNG + EXR screenshots, and `--smoke-test` for
+    scripted checks.
 - PRD §9 tests 1–14 pass, as do FR-X3 (scene round trip) and a renderer lensing validation against the exact
   Schwarzschild lens map. **PRD test 15 passes**: the GPU per-pixel tracer agrees with the CPU f64 reference
   on 100% of ray statuses, with 99.97% of escape directions within 1e-3 rad.
 - **PRD test 16 passes:** GPU images match the CPU reference for all `scenes/*.toml`. Total luminance is within
   0.5%, and at most 3.3% of pixels differ by more than 8 display levels, all of it from the footprint method.
-- **Next work package:** WP-10 — Viewer shell (winit window, wgpu surface, render loop, egui scaffolding,
-  screenshot).
+- **Next work package:** WP-11 — Interactive flight (input → thrust, per-frame observer integration, presets,
+  time warp, HUD, spin slider, effect toggles).
 - Toolchain: rustup, Rust **1.99.1** (`rust-toolchain.toml`).
 - The user approved shipping the CC BY-SA 4.0 CIE table (2026-10-30; see `THIRD_PARTY.md`).
 - Open questions for the user:
@@ -56,7 +58,7 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
 | WP-07 | GPU foundation | done | `wp-07` |
 | WP-08 | GPU ray tracer | done | `wp-08` |
 | WP-09 | GPU shading & headless GPU render | done | `wp-09` |
-| WP-10 | Viewer shell | not started | |
+| WP-10 | Viewer shell | done | `wp-10` |
 | WP-11 | Interactive flight | not started | |
 | WP-12 | Performance | not started | |
 | WP-13 | v1 polish & release | not started | |
@@ -94,6 +96,104 @@ Template for each entry (copy above the previous entry):
 **Notes for the next agent**
 -
 -->
+
+## WP-10 — Viewer shell — 2026-10-30 — COMPLETE
+
+(Started in one session, which was cut off by a usage limit after committing work in progress to the branch;
+finished in the next.)
+
+**Summary**
+- **Viewer** (`gravography`, no subcommand; `crates/gravography-app/src/viewer/`):
+  - winit 0.30 window and wgpu surface (format from `egui_wgpu::preferred_framebuffer_format`, `AutoVsync`);
+  - progressive rendering of a fixed camera: one jittered sample per redraw via `GpuRenderer::render_sample`
+    into a persistent `GpuFrame`, until the sample target is reached, then idle (`ControlFlow::Wait`);
+  - present pass (tone-mapped accumulation buffer stretched over the window) with the egui panel on top;
+  - resize reconfigures the surface and restarts accumulation;
+  - auto exposure metered from an HDR readback after the first sample and at convergence.
+- **Panel (egui 0.37):** sample target, render scale, auto exposure, EV, tone-map operator, screenshot button;
+  status (GPU, fps, internal size, samples, exposure scale, last message).
+- **Screenshots (FR-X1):** P or the button renders a converged frame at the full window resolution (`render`
+  with the sample target) and writes `screenshots/gravography-<unix>-<n>.png` (GPU tone map) and `.exr`
+  (linear HDR, exposed). They use the exposure shown on screen. `screenshots/` is gitignored.
+- **Render crate:**
+  - `GpuFrame::new` + `GpuRenderer::render_sample` for persistent per-frame buffers;
+  - `Presenter` (`present.wgsl`);
+  - tone-map operators shared in `tonemap_ops.wgsl`;
+  - `GpuContext::{for_surface, from_adapter}`, plus an `adapter` field.
+- **CLI:** `--scene`, `--screenshot-dir`, `--no-cache` and `--smoke-test`. The smoke test converges, takes a
+  screenshot, asks for a 75%×80% window, waits for the size change, converges, takes a second screenshot,
+  checks the PNG sizes and that the EXRs exist, then exits 0 (or fails after 120 s).
+
+**Key files/modules**
+- `crates/gravography-app/src/viewer/mod.rs`: `App` (ApplicationHandler), `Gfx` (surface, renderer, egui),
+  redraw, resize, screenshot, smoke test.
+- `crates/gravography-app/src/viewer/state.rs`: `ViewSettings`, `internal_size`, `Accumulation` (tested).
+- `crates/gravography-app/src/viewer/ui.rs`: the egui panel.
+- `crates/gravography-app/src/viewer/screenshot.rs`: file naming (tested).
+- `crates/gravography-render/src/gpu/present.rs` and `shaders/present.wgsl`, `shaders/tonemap_ops.wgsl`.
+
+**Decisions & deviations**
+- **Render scale 0.5 by default:** a Retina window is 2560×1440 physical pixels. Dynamic resolution is WP-12.
+- **Sample target:** at least 16 (from the scene's `samples`); each sample's footprint is `1/target` of a
+  pixel, as in the headless renderer.
+- **Exposure metering:** a blocking HDR readback at sample 1 and at convergence, instead of a GPU reduction.
+  Fine for a fixed camera; WP-11/12 needs a GPU log-average for a moving camera.
+- **Screenshot exposure:** the on-screen (internal-resolution) exposure, not re-metered at full resolution, so
+  the file matches what was seen. Auto exposure is resolution-dependent (WP-06 known issue).
+- **No viewport split:** the 3D view covers the whole window and the panel overlays its left side.
+- **Default scene:** `Scene::default()`, a static observer at r = 30, Schwarzschild, auto exposure at 0 EV
+  (brighter than the example scenes' −2 EV).
+- **New app dependencies:** `winit` 0.30.13, `egui`, `egui-wgpu` and `egui-winit` 0.37 (all on the same wgpu
+  30.0.1), `wgpu` and `pollster`. PRD unchanged.
+
+**Tests**
+- `cargo test --workspace`: 208 passed, 3 ignored. `test16_larger` was run for this WP and passes; the
+  tracer is unchanged.
+- **New:** `present_pass_matches_tonemap`. The present pass rendered into an offscreen Rgba8Unorm texture
+  matches the GPU tone-map compute output to ±1 level. This verifies the window path headlessly.
+- **New:** `Presenter` layout vs naga; present shader validation; viewer state (internal size, accumulation and
+  metering, which settings reset); screenshot naming.
+
+**Visual checks**
+- **Smoke test:** `gravography --smoke-test --screenshot-dir target/screenshots/viewer` on an Apple M2 Pro /
+  macOS:
+  - the window opened and rendered at 2560×1440 physical pixels;
+  - it was resized to 1920×1152 and re-rendered;
+  - PNG + EXR screenshots were written at both sizes;
+  - exit code 0, 11.5 s total.
+- **Screenshot content:** the default-scene screenshot shows the Schwarzschild shadow at r = 30, the photon
+  ring, the Einstein ring and the galactic band's secondary images. It is brighter than the example scenes
+  (auto 0 EV).
+- **Live window capture:** not possible from the agent session (`screencapture` reports "could not create image
+  from display", probably missing Screen Recording permission). The on-screen path is covered by the present-pass
+  test and the smoke test.
+- **Normal launch:** `gravography --scene scenes/kerr_edge_on.toml` launched and ran without errors until it
+  was terminated. **User:** please run `cargo run --release -p gravography-app` once to confirm the window and
+  panel look right.
+
+**Performance**
+- Startup: sky from cache 0.1 s, then texture upload and pipeline creation; first frame well under the 3 s of
+  NF-6.
+- Smoke test: 4 samples at 1280×720 internal, plus two full-resolution (2560×1440, 1920×1152) 4-sample
+  screenshots, 11.5 s in total including EXR writing (43 MB at full resolution).
+- No fps measurements yet (WP-12).
+
+**Known issues / tech debt**
+- **Per-frame allocation:** `render_sample` and `Presenter::draw` create small uniform buffers and bind groups
+  every frame. Fine for now; make them persistent in WP-12.
+- **Blocking exposure readback:** auto exposure uses a blocking readback, which is not suitable for a moving
+  camera (see Decisions).
+- **No live window capture:** the agent could not inspect the live window image.
+- **No progress indicator:** screenshots render synchronously, so the UI freezes for about a second.
+
+**Notes for the next agent (WP-11)**
+- **Camera and observer:** the camera comes from `ViewerOptions.scene` via `Gfx::frame_params`. For flight,
+  keep an `Observer<f64>` in `Gfx`, advance it per frame (`Observer::advance`), build `FrameParams` from its
+  position and tetrad (with the look rotation applied by `Tetrad::rotated`), and call `restart()` whenever the
+  camera moves.
+- **Panel:** add controls in `ui.rs`.
+- **Input:** keyboard events already reach `window_event`. Check `response.consumed` so typing into egui does
+  not move the camera.
 
 ## WP-09 — GPU shading & headless GPU render — 2026-10-30 — COMPLETE
 

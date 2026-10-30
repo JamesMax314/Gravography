@@ -313,3 +313,127 @@ fn gpu_render_is_deterministic() {
         .expect("render");
     assert!(a == b);
 }
+
+#[test]
+fn present_pass_matches_tonemap() {
+    // The viewer's present pass (fragment shader into a non-sRGB target, shader-side sRGB encoding) must show the
+    // same pixels as the headless tone map when the destination rectangle equals the image (1:1, nearest): ±1
+    // level for the different rounding paths (8-bit UNORM store vs floor(x + 0.5)).
+    let Some(ctx) = GpuContext::for_tests("present_pass_matches_tonemap") else {
+        return;
+    };
+    let path = &scene_files()[3];
+    let (frame, sky) = test_scene(path, 64, 40, 1);
+    let renderer = GpuRenderer::new(&ctx);
+    let out = renderer
+        .render(
+            &ctx,
+            &frame,
+            &GpuSky::upload(&ctx, &sky).expect("upload"),
+            &TraceParams::gpu_default(),
+        )
+        .expect("render");
+    let hdr = renderer.read_hdr(&ctx, &out).expect("readback");
+    let scale = display_scale(&frame, &hdr, &sky);
+    let expect = renderer
+        .tonemap(&ctx, &out, scale, frame.tone_map)
+        .expect("tonemap");
+
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let presenter = gravography_render::gpu::Presenter::new(&ctx, format);
+    let (w, h) = (frame.width, frame.height);
+    let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("present target"),
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    // Rows padded to the 256-byte copy alignment.
+    let row = (w * 4).div_ceil(256) * 256;
+    let readback = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("present readback"),
+        size: u64::from(row * h),
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("present test"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::RED),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        presenter.draw(
+            &ctx,
+            &mut pass,
+            &out,
+            scale,
+            frame.tone_map,
+            [0.0, 0.0, w as f32, h as f32],
+        );
+    }
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row),
+                rows_per_image: Some(h),
+            },
+        },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+    );
+    ctx.queue.submit([encoder.finish()]);
+    let slice = readback.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |r| r.expect("map"));
+    ctx.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll");
+    let data = slice.get_mapped_range().expect("mapped").to_vec();
+    let mut worst = 0;
+    for y in 0..h as usize {
+        for x in 0..w as usize {
+            let p = &data[y * row as usize + 4 * x..][..3];
+            let e = &expect[3 * (y * w as usize + x)..][..3];
+            for k in 0..3 {
+                worst = worst.max((i32::from(p[k]) - i32::from(e[k])).abs());
+            }
+        }
+    }
+    assert!(
+        worst <= 1,
+        "present pass differs from the tone map by {worst} levels"
+    );
+}

@@ -187,6 +187,24 @@ pub struct GpuFrame {
 }
 
 impl GpuFrame {
+    /// Allocates the G-buffer and accumulation buffer for a `width × height` image. They persist across frames:
+    /// the viewer adds one sample per frame with [`GpuRenderer::render_sample`] (progressive refinement).
+    pub fn new(ctx: &GpuContext, width: u32, height: u32, max_steps: u32) -> Self {
+        let accum = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("accumulation"),
+            size: u64::from(width) * u64::from(height) * 16,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        Self {
+            gbuffer: GBuffer::new(ctx, width, height),
+            accum,
+            width,
+            height,
+            max_steps,
+        }
+    }
+
     fn pixels(&self) -> u32 {
         self.width * self.height
     }
@@ -305,89 +323,94 @@ impl GpuRenderer {
         params: &TraceParams<f32>,
     ) -> Result<GpuFrame, RenderError> {
         frame.validate()?;
+        let target = GpuFrame::new(ctx, frame.width, frame.height, params.max_steps);
+        for s in 0..frame.samples {
+            self.render_sample(ctx, frame, sky, params, &target, s)?;
+        }
+        Ok(target)
+    }
+
+    /// Traces and shades sample `sample_index` (jitter [`sample_offset`]`(sample_index)`) into `target`. Sample 0
+    /// resets the accumulation; each sample's footprint is `1/frame.samples` of a pixel. Returns after submitting.
+    ///
+    /// # Errors
+    /// Invalid frame parameters, or a target whose size differs from the frame.
+    pub fn render_sample(
+        &self,
+        ctx: &GpuContext,
+        frame: &FrameParams,
+        sky: &GpuSky,
+        params: &TraceParams<f32>,
+        target: &GpuFrame,
+        sample_index: u32,
+    ) -> Result<(), RenderError> {
         let dev = &ctx.device;
-        let gbuffer = GBuffer::new(ctx, frame.width, frame.height);
-        let pixels = u64::from(frame.width) * u64::from(frame.height);
-        let accum = dev.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("accumulation"),
-            size: pixels * 16,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
         let m = xyz_to_linear_srgb_matrix();
         let row = |i: usize| [m[i][0] as f32, m[i][1] as f32, m[i][2] as f32, 0.0];
-        for s in 0..frame.samples {
-            let jitter = sample_offset(s);
-            self.tracer.trace(ctx, frame, params, jitter, &gbuffer)?;
-            let shade = GpuShadeParams {
-                xyz_to_rgb: [row(0), row(1), row(2)],
-                lut_t_min: sky.lut_range.0,
-                lut_t_max: sky.lut_range.1,
-                lut_n: sky.lut_n,
-                base_size: sky.base_size,
-                mip_count: sky.mip_count,
-                samples: frame.samples,
-                flags: if frame.effects.beaming { FLAG_BEAMING } else { 0 },
-                sample_index: s,
-            };
-            let uniform = |label, bytes: &[u8]| {
-                dev.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some(label),
-                    contents: bytes,
-                    usage: wgpu::BufferUsages::UNIFORM,
-                })
-            };
-            let shade_buf = uniform("shade params", bytemuck::bytes_of(&shade));
-            let camera_buf = uniform("camera", bytemuck::bytes_of(&GpuCamera::new(frame, jitter)));
-            let bind_group = dev.create_bind_group(&wgpu::BindGroupDescriptor {
+        let jitter = sample_offset(sample_index);
+        self.tracer.trace(ctx, frame, params, jitter, &target.gbuffer)?;
+        let shade = GpuShadeParams {
+            xyz_to_rgb: [row(0), row(1), row(2)],
+            lut_t_min: sky.lut_range.0,
+            lut_t_max: sky.lut_range.1,
+            lut_n: sky.lut_n,
+            base_size: sky.base_size,
+            mip_count: sky.mip_count,
+            samples: frame.samples,
+            flags: if frame.effects.beaming { FLAG_BEAMING } else { 0 },
+            sample_index,
+        };
+        let uniform = |label, bytes: &[u8]| {
+            dev.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents: bytes,
+                usage: wgpu::BufferUsages::UNIFORM,
+            })
+        };
+        let shade_buf = uniform("shade params", bytemuck::bytes_of(&shade));
+        let camera_buf = uniform("camera", bytemuck::bytes_of(&GpuCamera::new(frame, jitter)));
+        let bind_group = dev.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shade"),
+            layout: &self.shade_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: shade_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: camera_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: target.gbuffer.buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&sky.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: sky.lut.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: target.accum.as_entire_binding(),
+                },
+            ],
+        });
+        let mut encoder = dev.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("shade"),
-                layout: &self.shade_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: shade_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: camera_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: gbuffer.buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::TextureView(&sky.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: sky.lut.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: accum.as_entire_binding(),
-                    },
-                ],
+                timestamp_writes: None,
             });
-            let mut encoder = dev.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-            {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("shade"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(&self.shade);
-                pass.set_bind_group(0, &bind_group, &[]);
-                pass.dispatch_workgroups(frame.width.div_ceil(8), frame.height.div_ceil(8), 1);
-            }
-            ctx.queue.submit([encoder.finish()]);
+            pass.set_pipeline(&self.shade);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(frame.width.div_ceil(8), frame.height.div_ceil(8), 1);
         }
-        Ok(GpuFrame {
-            gbuffer,
-            accum,
-            width: frame.width,
-            height: frame.height,
-            max_steps: params.max_steps,
-        })
+        ctx.queue.submit([encoder.finish()]);
+        Ok(())
     }
 
     /// Reads the accumulated HDR image (mean linear sRGB per pixel).
