@@ -8,14 +8,24 @@
 //! Derivations are in `docs/physics.md`.
 
 pub mod boyer_lindquist;
+pub mod connection;
 pub mod error;
+pub mod geodesic;
+pub mod invariants;
 pub mod kerr;
 pub mod kerr_schild;
 pub mod linalg;
 pub mod scalar;
+#[cfg(test)]
+mod test_util;
 
+pub use connection::{Christoffel, ks_christoffel};
 pub use error::PhysicsError;
+pub use geodesic::{ks_hamiltonian, ks_hamiltonian_rhs};
 pub use kerr::Kerr;
-pub use kerr_schild::{KsFields, ks_fields, ks_g_lo, ks_g_up, ks_radius};
+pub use kerr_schild::{
+    KsFieldDerivs, KsFields, MetricDerivs, ks_dg_lo, ks_dg_up, ks_field_derivatives, ks_fields, ks_g_lo,
+    ks_g_up, ks_radius,
+};
 pub use linalg::{Mat4, Vec4};
 pub use scalar::Real;

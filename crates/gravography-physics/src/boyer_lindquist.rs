@@ -148,8 +148,8 @@ fn wrap_angle<T: Real>(phi: T) -> T {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::linalg::test_util::{max_abs, max_abs_diff};
     use crate::linalg::{inner, mat_mul, raise};
+    use crate::test_util::{max_abs, max_abs_diff};
     use approx::assert_relative_eq;
     use proptest::prelude::*;
     use std::f64::consts::{FRAC_PI_2, PI};

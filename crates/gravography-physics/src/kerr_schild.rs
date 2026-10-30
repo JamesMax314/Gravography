@@ -98,11 +98,105 @@ pub fn ks_g_up<T: Real>(mass: T, a: T, pos: &Vec4<T>) -> Mat4<T> {
     g
 }
 
+/// First derivatives of a rank-2 tensor field: `d[α][μ][ν] = ∂_α T_{μν}` (or `∂_α T^{μν}`).
+pub type MetricDerivs<T> = [Mat4<T>; 4];
+
+/// Coordinate gradients of the Kerr–Schild fields. Index `α` runs over `[t, x, y, z]`; all `t` components
+/// are zero (the fields are stationary).
+#[derive(Clone, Copy, Debug)]
+pub struct KsFieldDerivs<T> {
+    /// `∂_α r`.
+    pub dr: Vec4<T>,
+    /// `∂_α f`.
+    pub df: Vec4<T>,
+    /// `dl_lo[α][μ] = ∂_α l_μ`. Since `l^i = l_i` and `l^t = −1`, also `∂_α l^i = dl_lo[α][i]` and `∂_α l^t = 0`.
+    pub dl_lo: [Vec4<T>; 4],
+}
+
+/// Evaluates the Kerr–Schild fields and their analytic first derivatives at `pos = [t, x, y, z]`
+/// (`docs/physics.md` § "Derivatives of the Kerr–Schild fields"):
+///
+/// - `∂_i r = r³ (x, y, z (r² + a²)/r²)_i / D`, with `D = r⁴ + a² z²`;
+/// - `∂_i f = f [3 ∂_i r / r − (4 r³ ∂_i r + 2 a² z δ_iz) / D]`;
+/// - `∂_j l_x = (x ∂_j r + r δ_jx + a δ_jy − 2 r l_x ∂_j r) / (r² + a²)`,
+///   `∂_j l_y = (y ∂_j r + r δ_jy − a δ_jx − 2 r l_y ∂_j r) / (r² + a²)`,
+///   `∂_j l_z = δ_jz / r − z ∂_j r / r²`.
+///
+/// At `r = 0` (the disk, see [`ks_fields`]) the derivatives are singular or ill-defined. All of them are then
+/// returned as zero, consistent with `f = 0` there.
+pub fn ks_field_derivatives<T: Real>(mass: T, a: T, pos: &Vec4<T>) -> (KsFields<T>, KsFieldDerivs<T>) {
+    let fields = ks_fields(mass, a, pos);
+    let zero4 = [T::zero(); 4];
+    let r = fields.r;
+    let r2 = r * r;
+    if r2 <= T::zero() {
+        let derivs = KsFieldDerivs {
+            dr: zero4,
+            df: zero4,
+            dl_lo: [zero4; 4],
+        };
+        return (fields, derivs);
+    }
+    let [_, x, y, z] = *pos;
+    let (two, three, four) = (T::lit(2.0), T::lit(3.0), T::lit(4.0));
+    let a2 = a * a;
+    let q = r2 + a2;
+    let d = r2 * r2 + a2 * z * z;
+    let c = r * r2 / d;
+    let dr = [T::zero(), x * c, y * c, z * q * r / d];
+
+    let f = fields.f;
+    let mut df = zero4;
+    for j in 1..4 {
+        let dz = if j == 3 { two * a2 * z } else { T::zero() };
+        df[j] = f * (three * dr[j] / r - (four * r * r2 * dr[j] + dz) / d);
+    }
+
+    let [_, lx, ly, _] = fields.l_lo;
+    let delta = |i: usize, j: usize| if i == j { T::one() } else { T::zero() };
+    let mut dl_lo = [zero4; 4];
+    for (j, dl) in dl_lo.iter_mut().enumerate().skip(1) {
+        dl[1] = (x * dr[j] + r * delta(j, 1) + a * delta(j, 2) - two * r * lx * dr[j]) / q;
+        dl[2] = (y * dr[j] + r * delta(j, 2) - a * delta(j, 1) - two * r * ly * dr[j]) / q;
+        dl[3] = delta(j, 3) / r - z * dr[j] / r2;
+    }
+    (fields, KsFieldDerivs { dr, df, dl_lo })
+}
+
+/// `∂_α (f k_μ k_ν) = ∂_α f k_μ k_ν + f (∂_α k_μ k_ν + k_μ ∂_α k_ν)` for `k = l_lo` or `l_up`.
+fn d_f_ll<T: Real>(f: T, k: &Vec4<T>, df: &Vec4<T>, dk: &[Vec4<T>; 4], sign: T) -> MetricDerivs<T> {
+    core::array::from_fn(|al| {
+        core::array::from_fn(|mu| {
+            core::array::from_fn(|nu| {
+                sign * (df[al] * k[mu] * k[nu] + f * (dk[al][mu] * k[nu] + k[mu] * dk[al][nu]))
+            })
+        })
+    })
+}
+
+/// Analytic derivatives of the covariant metric, `∂_α g_{μν} = ∂_α(f l_μ l_ν)`, at `pos = [t, x, y, z]`.
+pub fn ks_dg_lo<T: Real>(mass: T, a: T, pos: &Vec4<T>) -> MetricDerivs<T> {
+    let (fl, d) = ks_field_derivatives(mass, a, pos);
+    d_f_ll(fl.f, &fl.l_lo, &d.df, &d.dl_lo, T::one())
+}
+
+/// Analytic derivatives of the contravariant metric, `∂_α g^{μν} = −∂_α(f l^μ l^ν)`, at `pos = [t, x, y, z]`
+/// (`docs/PRD.md` §5.3).
+pub fn ks_dg_up<T: Real>(mass: T, a: T, pos: &Vec4<T>) -> MetricDerivs<T> {
+    let (fl, d) = ks_field_derivatives(mass, a, pos);
+    // ∂l^t = 0 because l^t = −1; spatial components agree with dl_lo.
+    let mut dl_up = d.dl_lo;
+    for dl in &mut dl_up {
+        dl[0] = T::zero();
+    }
+    d_f_ll(fl.f, &fl.l_up(), &d.df, &dl_up, -T::one())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::linalg::test_util::{max_abs, max_abs_diff};
     use crate::linalg::{determinant, identity, inner, mat_mul};
+    use crate::test_util::{event, max_abs, max_abs_diff, richardson};
     use approx::assert_relative_eq;
     use proptest::prelude::*;
 
@@ -110,26 +204,6 @@ mod tests {
     /// products of two entries this gives ≲ 1e-14 · (1 + f)².
     fn identity_tol(f: f64) -> f64 {
         1e-14 * (1.0 + f).powi(2)
-    }
-
-    /// Random events away from the ring singularity, with extra weight near the axis and equator.
-    fn event() -> impl Strategy<Value = (f64, Vec4<f64>)> {
-        let spin = 0.0..0.999_f64;
-        let coord = -30.0..30.0_f64;
-        let tiny = -1e-6..1e-6_f64;
-        let generic = (coord.clone(), coord.clone(), coord.clone()).prop_map(|(x, y, z)| [x, y, z]);
-        let near_axis = (tiny.clone(), tiny.clone(), coord.clone()).prop_map(|(x, y, z)| [x, y, z]);
-        let near_equator = (coord.clone(), coord, tiny).prop_map(|(x, y, z)| [x, y, z]);
-        let near_hole = (-3.0..3.0_f64, -3.0..3.0_f64, -3.0..3.0_f64).prop_map(|(x, y, z)| [x, y, z]);
-        (
-            spin,
-            prop_oneof![generic, near_axis, near_equator, near_hole],
-            -100.0..100.0_f64,
-        )
-            .prop_filter("stay away from the ring singularity", |(a, [x, y, z], _)| {
-                ks_radius(*a, *x, *y, *z) > 0.3
-            })
-            .prop_map(|(a, [x, y, z], t)| (a, [t, x, y, z]))
     }
 
     #[test]
@@ -253,6 +327,117 @@ mod tests {
             prop_assert!(max_abs_diff(&g, &shifted) <= 0.0);
             // f l_i l_j and f l_j l_i round differently: allow a few ε of the largest entry.
             prop_assert!(max_abs_diff(&g, &crate::linalg::transpose(&g)) < 4.0 * f64::EPSILON * max_abs(&g));
+        }
+    }
+
+    // ---- Derivatives (docs/PRD.md §9 test 2) ----
+
+    /// Finite-difference step relative to the local length scale `r`: Richardson truncation error
+    /// ~(h/r)⁴ ≈ 1e-12 and rounding ~ε r / h ≈ 1e-13 relative to the field scale.
+    const FD_STEP: f64 = 1e-3;
+    /// Agreement of analytic and Richardson finite-difference derivatives, relative to the derivative's
+    /// natural scale (field value / r, plus the analytic value). Expected error ~1e-12; margin ×1000.
+    const FD_TOL: f64 = 1e-9;
+
+    /// Shifts `pos` by `s` along the spatial axis `j ∈ 1..4`.
+    fn shifted(pos: &Vec4<f64>, j: usize, s: f64) -> Vec4<f64> {
+        let mut p = *pos;
+        p[j] += s;
+        p
+    }
+
+    proptest! {
+        #[test]
+        fn field_derivatives_match_finite_differences((a, pos) in event()) {
+            let (fl, d) = ks_field_derivatives(1.0, a, &pos);
+            let h = FD_STEP * fl.r;
+            for j in 1..4 {
+                let field = |s: f64| ks_fields(1.0, a, &shifted(&pos, j, s));
+                let checks = [
+                    (richardson(|s| field(s).r, h), d.dr[j], fl.r),
+                    (richardson(|s| field(s).f, h), d.df[j], fl.f),
+                    (richardson(|s| field(s).l_lo[1], h), d.dl_lo[j][1], 1.0),
+                    (richardson(|s| field(s).l_lo[2], h), d.dl_lo[j][2], 1.0),
+                    (richardson(|s| field(s).l_lo[3], h), d.dl_lo[j][3], 1.0),
+                ];
+                for (k, (fd, an, value)) in checks.into_iter().enumerate() {
+                    let scale = value.abs() / fl.r + an.abs();
+                    prop_assert!((fd - an).abs() <= FD_TOL * scale, "axis {j}, quantity {k}: fd {fd} vs {an}");
+                }
+            }
+            // Stationarity: no t-dependence, and l_t = 1 is constant.
+            prop_assert!(d.dr[0].abs() + d.df[0].abs() <= 0.0);
+            prop_assert!(d.dl_lo.iter().all(|dl| dl[0].abs() <= 0.0));
+        }
+
+        #[test]
+        fn metric_derivatives_match_finite_differences((a, pos) in event()) {
+            let dg_lo = ks_dg_lo(1.0, a, &pos);
+            let dg_up = ks_dg_up(1.0, a, &pos);
+            let r = ks_fields(1.0, a, &pos).r;
+            let h = FD_STEP * r;
+            for j in 1..4 {
+                for mu in 0..4 {
+                    for nu in 0..4 {
+                        let fd_lo = richardson(|s| ks_g_lo(1.0, a, &shifted(&pos, j, s))[mu][nu], h);
+                        let fd_up = richardson(|s| ks_g_up(1.0, a, &shifted(&pos, j, s))[mu][nu], h);
+                        // Scale: entries of g are ~(1 + f), varying on the length scale r.
+                        let scale = (1.0 + ks_fields(1.0, a, &pos).f) / r;
+                        prop_assert!((fd_lo - dg_lo[j][mu][nu]).abs() <= FD_TOL * scale);
+                        prop_assert!((fd_up - dg_up[j][mu][nu]).abs() <= FD_TOL * scale);
+                    }
+                }
+            }
+            prop_assert!(max_abs(&dg_lo[0]) + max_abs(&dg_up[0]) <= 0.0);
+        }
+
+        #[test]
+        fn inverse_metric_derivative_identity((a, pos) in event()) {
+            // ∂_α g^{μν} = −g^{μρ} (∂_α g_{ρσ}) g^{σν}, from ∂(g g⁻¹) = 0. Entries of size (1 + f)³/r.
+            let g_up = ks_g_up(1.0, a, &pos);
+            let dg_lo = ks_dg_lo(1.0, a, &pos);
+            let dg_up = ks_dg_up(1.0, a, &pos);
+            let fl = ks_fields(1.0, a, &pos);
+            for al in 1..4 {
+                let rhs = mat_mul(&g_up, &mat_mul(&dg_lo[al], &g_up));
+                let neg: Mat4<f64> = core::array::from_fn(|i| core::array::from_fn(|j| -rhs[i][j]));
+                prop_assert!(max_abs_diff(&dg_up[al], &neg) < 1e-13 * (1.0 + fl.f).powi(3) / fl.r);
+            }
+        }
+    }
+
+    #[test]
+    fn derivatives_vanish_for_zero_mass() {
+        let pos = [0.0, 1.2, -0.4, 0.7];
+        assert!(ks_dg_up(0.0, 0.9, &pos).iter().all(|m| max_abs(m) <= 0.0));
+        assert!(ks_dg_lo(0.0, 0.9, &pos).iter().all(|m| max_abs(m) <= 0.0));
+    }
+
+    #[test]
+    fn schwarzschild_radius_gradient_is_radial_unit_vector() {
+        // a = 0: r = |x|, so ∂_i r = x_i / r and f = 2M/r gives ∂_i f = −2M x_i / r³.
+        let pos = [0.0, 1.0, 2.0, -2.0];
+        let (_, d) = ks_field_derivatives(1.0, 0.0, &pos);
+        for j in 1..4 {
+            assert_relative_eq!(d.dr[j], pos[j] / 3.0, max_relative = 1e-15);
+            assert_relative_eq!(d.df[j], -2.0 * pos[j] / 27.0, max_relative = 1e-14);
+        }
+    }
+
+    #[test]
+    fn f32_derivatives_track_f64() {
+        // f32 evaluation of the same formulas: relative error ~ a few ε_f32 · condition ≈ 1e-6; allow 1e-5.
+        let (a, pos) = (0.9, [0.0, 2.5, -1.5, 1.0]);
+        let d64 = ks_dg_up(1.0, a, &pos);
+        let d32 = ks_dg_up(1.0_f32, a as f32, &pos.map(|v| v as f32));
+        let scale = d64.iter().map(max_abs).fold(0.0, f64::max);
+        for al in 0..4 {
+            for mu in 0..4 {
+                for nu in 0..4 {
+                    let diff = (f64::from(d32[al][mu][nu]) - d64[al][mu][nu]).abs();
+                    assert!(diff < 1e-5 * scale, "{al}{mu}{nu}: {diff}");
+                }
+            }
         }
     }
 }
