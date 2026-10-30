@@ -23,8 +23,8 @@ impl<T: Real> Kerr<T> {
         r * r + self.spin() * self.spin() * c * c
     }
 
-    /// Covariant Kerr metric in BL coordinates `(t, r, θ, φ)` at `(r, θ)` (standard form, e.g. Visser 2007
-    /// eq. 1): `g_tt = −(1 − 2Mr/Σ)`, `g_tφ = −2Mar sin²θ/Σ`, `g_rr = Σ/Δ`, `g_θθ = Σ`,
+    /// Covariant Kerr metric in BL coordinates `(t, r, θ, φ)` at `(r, θ)` (standard form, Visser 2007):
+    /// `g_tt = −(1 − 2Mr/Σ)`, `g_tφ = −2Mar sin²θ/Σ`, `g_rr = Σ/Δ`, `g_θθ = Σ`,
     /// `g_φφ = (r² + a² + 2Ma²r sin²θ/Σ) sin²θ`.
     pub fn bl_g_lo(&self, r: T, theta: T) -> Mat4<T> {
         let (m, a) = (self.mass(), self.spin());
@@ -186,7 +186,7 @@ mod tests {
     #[test]
     fn schwarzschild_time_offset_is_eddington_finkelstein() {
         // a = 0: v = t + r + 2M ln|r/2M − 1| and t_KS = v − r, i.e. T(r) = 2M ln|r − 2M| up to a constant
-        // (MTW §31.4). Our constant choice makes it exactly 2 ln|r − 2|.
+        // (Cartesian form). Our constant choice makes it exactly 2 ln|r − 2|.
         let k = Kerr::<f64>::schwarzschild();
         for r in [0.5, 1.5, 2.5, 10.0, 1e3] {
             assert_relative_eq!(
@@ -230,7 +230,7 @@ mod tests {
     #[test]
     fn frame_dragging_sign_for_positive_spin() {
         // ZAMO: u_μ ∝ −∇_μ t_BL, i.e. p_BL = (−1, 0, 0, 0). Its angular velocity dφ/dt = u^φ/u^t is
-        // ω = 2Mar / ((r² + a²)² − Δ a² sin²θ) > 0 for a > 0 (Bardeen, Press & Teukolsky 1972, eq. 3.3).
+        // ω = 2Mar / ((r² + a²)² − Δ a² sin²θ) > 0 for a > 0 (Bardeen, Press & Teukolsky 1972).
         // Computed here entirely through the KS metric and the BL ↔ KS transforms, which checks that
         // a > 0 means rotation in the +φ sense (docs/PRD.md §2).
         let k = Kerr::new(0.9_f64).unwrap();

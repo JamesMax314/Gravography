@@ -134,7 +134,7 @@ mod tests {
 
     #[test]
     fn radius_far_away_is_euclidean_distance() {
-        // r → ρ as ρ → ∞ with corrections O(a²/ρ) (Visser 2007, eq. for r(x, y, z)).
+        // r → ρ as ρ → ∞ with corrections O(a²/ρ) (follows from the quartic for r).
         let (a, x, y, z): (f64, f64, f64, f64) = (0.9, 3.0e3, -4.0e3, 1.2e4);
         let rho = (x * x + y * y + z * z).sqrt();
         assert_relative_eq!(ks_radius(a, x, y, z), rho, max_relative = a * a / (rho * rho));
@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn schwarzschild_is_ingoing_eddington_finkelstein() {
-        // a = 0: g = η + (2M/r) l l with l = (1, x/r, y/r, z/r) (MTW §31.4, Cartesian form).
+        // a = 0: g = η + (2M/r) l l with l = (1, x/r, y/r, z/r) (Cartesian form).
         let pos = [1.0, 2.0, -3.0, 4.0];
         let r = (4.0_f64 + 9.0 + 16.0).sqrt();
         let l = [1.0, 2.0 / r, -3.0 / r, 4.0 / r];
@@ -229,7 +229,7 @@ mod tests {
 
         #[test]
         fn determinant_is_minus_one((a, pos) in event()) {
-            // Kerr–Schild form has det g = det η = −1 exactly (Visser 2007 §3). The determinant of
+            // Kerr–Schild form has det g = det η = −1 exactly (Visser 2007). The determinant of
             // entries of size (1 + f) has cancellation of order (1 + f)⁴ ε.
             let f = ks_fields(1.0, a, &pos).f;
             let g = ks_g_lo(1.0, a, &pos);

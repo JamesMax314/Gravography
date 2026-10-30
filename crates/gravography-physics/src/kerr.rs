@@ -117,7 +117,7 @@ impl<T: Real> Kerr<T> {
         two * self.mass * (T::one() + (two / T::lit(3.0) * chi.acos()).cos())
     }
 
-    /// Innermost stable circular orbit radius (Bardeen, Press & Teukolsky 1972, eq. 2.21):
+    /// Innermost stable circular orbit radius (Bardeen, Press & Teukolsky 1972):
     /// `Z₁ = 1 + (1 − χ²)^{1/3}[(1 + χ)^{1/3} + (1 − χ)^{1/3}]`, `Z₂ = sqrt(3χ² + Z₁²)`,
     /// `r = M (3 + Z₂ ∓ sqrt((3 − Z₁)(3 + Z₁ + 2Z₂)))`, upper sign prograde.
     pub fn isco(&self, prograde: bool) -> T {
@@ -241,7 +241,7 @@ mod tests {
         #[test]
         fn photon_orbits_satisfy_circular_orbit_condition(a in 0.0..0.999_f64) {
             // Circular equatorial orbits have E ∝ 1/sqrt(r^{3/2} − 3M r^{1/2} ± 2a M^{1/2}); the photon orbit is
-            // the zero of the denominator (BPT 1972, eq. 2.12), upper sign prograde.
+            // the zero of the denominator (BPT 1972), upper sign prograde.
             let k = Kerr::new(a).unwrap();
             for (pro, s) in [(true, 1.0), (false, -1.0)] {
                 let r = k.photon_orbit(pro);
@@ -251,7 +251,7 @@ mod tests {
 
         #[test]
         fn isco_satisfies_marginal_stability(a in 0.0..0.999_f64) {
-            // Marginal stability: r² − 6Mr ± 8a sqrt(Mr) − 3a² = 0 (BPT 1972, eq. 2.20), upper sign prograde.
+            // Marginal stability: r² − 6Mr ± 8a sqrt(Mr) − 3a² = 0 (BPT 1972), upper sign prograde.
             let k = Kerr::new(a).unwrap();
             for (pro, s) in [(true, 1.0), (false, -1.0)] {
                 let r = k.isco(pro);
