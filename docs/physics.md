@@ -475,3 +475,96 @@ as-is (`+z` = spin axis).
 - **Cache** (`cache.rs`): binary dump keyed by FNV-1a of the bake version and `Debug` text of `SkyParams`; a
   mismatching or corrupt file is a miss. The directory is chosen by the app.
 
+
+## Rendering
+
+`gravography-render` (WP-06). The CPU reference renderer (`cpu.rs`) defines the image the GPU must reproduce.
+
+### Camera and projection
+
+`camera.rs`. A pixel's viewing direction is `n = (n_f, n_l, n_u)` in the camera tetrad (forward, left, up),
+`docs/PRD.md` §5.4. Rectilinear (pinhole) projection with vertical field of view `φ`, half-height `t = tan(φ/2)` on
+the unit-distance image plane, continuous pixel coordinate `(x, y)` (`y` down):
+`n ∝ (1, −(2x/W − 1) t W/H, (1 − 2y/H) t)`. Pixel pitch on the plane is `Δ = 2t/H`, so a pixel subtends
+`dΩ = Δ² cos³θ` with `cos θ = n_f` (tested: the sum over pixels equals the pyramid solid angle
+`4 asin(sin α sin β)`).
+
+### Boosted observers
+
+`Tetrad::boosted` (physics crate). An observer moving with velocity `β n̂` (`n̂` in the old spatial frame,
+`γ = (1 − β²)^{−1/2}`) has the boosted tetrad
+`e'_(0) = γ (e_(0) + β n̂ⁱ e_(i))`, `e'_(j) = e_(j) + n̂_j [(γ − 1) n̂ⁱ e_(i) + γ β e_(0)]`, i.e. the standard pure boost
+matrix `Λ` (no Thomas–Wigner rotation) applied in tetrad components. Since `Λ` preserves `η`, the new legs are
+orthonormal; legs perpendicular to `n̂` are unchanged. Scene files use it for a camera moving relative to a preset
+observer. Tested: Minkowski Doppler factor `sqrt((1 + β)/(1 − β))` straight ahead; orthonormality and
+`−g(u, u') = γ` in Kerr (property test).
+
+### Shading
+
+For a sample with escape direction `d` and frequency shift `g = 1/p_t` (`docs/PRD.md` §5.7; computed at the
+camera, so it is the same for every integrator), the cube map averaged over the sample's sky footprint gives
+`(w̄, (wT)‾)`, and the band response is
+
+`XYZ = w̄ · c(g T̄)`, `T̄ = (wT)‾ / w̄`,
+
+because a blackbody of temperature `T` seen with shift `g` is a blackbody of temperature `gT` (`I_ν,obs =
+g³ I_ν,emit(ν/g)`), and `w` scales specific intensity. This is surface brightness: lensing magnification is not
+applied explicitly. It appears through the footprint, because a magnified region (small sky footprint per pixel)
+samples a fine mip level where a star is concentrated, and a demagnified region averages over many texels. XYZ is
+converted to linear sRGB (D65) and averaged over the samples of the pixel.
+
+**Effect toggles** (`docs/PRD.md` §6.4):
+- lensing off: `d` is the unit spatial part of `k = −e_(0) + nⁱ e_(i)` (aberration and the coordinate direction of
+  the local frame kept, no bending); the footprint is computed the same way;
+- frequency shift off: `g = 1`;
+- beaming off: `XYZ = w̄ c(gT̄) / g⁴`, since the bolometric intensity of a blackbody `∝ T⁴` grows by `g⁴`.
+
+### Footprint by ray differentials
+
+The sky solid angle covered by one pixel is `|J_x × J_y|` with `J = ∂d/∂(x, y)` the Jacobian of the escape
+direction with respect to pixel coordinates (first-order area element on the unit sphere). The CPU renderer
+traces two extra rays at `(x + ε, y)` and `(x, y + ε)` (`ε = 0.25` px) and uses forward differences
+`J_x ≈ (d(x + ε) − d)/ε`. If a differential ray is captured it retries at `−ε`. If one axis still fails, the footprint
+is `|J|²` of the other axis (isotropic). If both fail, it is the unlensed pixel solid angle. The stats count both
+cases. With `N` samples per pixel, each sample's footprint is `1/N` of the pixel's.
+
+The mip level is `lod = ½ log₂(Ω / Ω_texel(d))` with the level-0 texel solid angle at `d`,
+`Ω_texel = (2/N_face)² |d_major|³` (from `dΩ = ds dt / (1 + s² + t²)^{3/2}`; matches the exact texel solid angle to
+`O(N⁻²)`), and the cube map is sampled trilinearly (`CubeMap::sample_trilinear`).
+
+**Approximations.**
+- The footprint is isotropic: the area is right but not the shape. Near the critical curve the true footprint is
+  a long thin arc; a square of the same area averages a different set of texels. This is unbiased on average but
+  the texture is softer than with anisotropic filtering. Supersampling (`samples > 1`) reduces the error.
+- Stars are 1–2 texels wide in the cube map (PRD §6.3). Where lensing magnifies the sky strongly (the Einstein ring
+  and the photon rings), a pixel sees a single texel. Stars are therefore drawn as arcs of texel width and texel
+  surface brightness, not as thin, much brighter arcs. The flux of each image is correct to first order.
+- Forward differences have `O(ε)` truncation error. Against the exact Schwarzschild lens map (below) it is
+  ≤ 7e-4 relative at `ε = 0.05` px, which is negligible for mip selection.
+
+**Validation** (`crates/gravography-render/tests/render_validation.rs`). A static camera at `d = 10⁴` in
+Schwarzschild: the exact map from the local ray angle `θ` to the sky angle `ψ` is obtained by quadrature of the
+orbit equation `(du/dφ)² = 1/b² − u² + 2u³` with `b = d sin θ / sqrt(1 − 2/d)`, `ψ = π − Δφ`. The renderer's escape
+directions match `ψ` to 7e-12 rad. Its footprint divided by the pixel solid angle matches the inverse
+magnification `(sin ψ / sin θ) |dψ/dθ|` to ≤ 7e-4 for `θ/θ_E ∈ {0.7, 0.9, 1.2, 1.5, 2.5}`, both inside the Einstein
+ring (secondary images, parity flip) and outside it.
+
+### Exposure and tone mapping
+
+`tonemap.rs`. The HDR image is linear sRGB in LUT units (W m⁻² sr⁻¹ for the human-vision band) and is never
+clamped. Display: `encode_sRGB(tonemap(s · rgb))`.
+
+- Auto exposure: `s = 2^EV · 0.18 / L̄`, with `L̄ = exp(mean ln Y)` over pixels with `Y > 0`. Black pixels are
+  excluded so that the shadow's size does not change the exposure. The sum runs sequentially, which keeps it
+  deterministic.
+- Manual exposure: `s = 2^EV / Y_ref`, where `Y_ref` is the luminance of a 5772 K blackbody with `w = 1`, `g = 1`.
+- ACES fitted (S. Hill): `M_out · RRT_ODT(M_in · rgb)` with the rational fit
+  `(v(v + 0.0245786) − 0.000090537) / (v(0.983729 v + 0.4329510) + 0.238081)`.
+- Extended Reinhard on luminance with white point 16, which preserves hue.
+- EXR output stores `s · rgb` (exposed, not tone-mapped). PNG stores 8-bit sRGB.
+
+### Sampling and determinism
+
+Sample `k` of a pixel is at offset `frac(½ + k (1/φ₂, 1/φ₂²))` (R2 sequence, `φ₂` the plastic number). Sample 0 is
+the pixel centre. Pixels are computed independently (rayon over rows) and statistics are integer sums, so the
+image is bit-identical between runs (NF-3; tested).

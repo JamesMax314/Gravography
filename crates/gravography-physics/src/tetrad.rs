@@ -77,6 +77,36 @@ impl<T: Real> Tetrad<T> {
         Self { e_up: e }
     }
 
+    /// Tetrad of an observer moving with velocity `beta = βⁱ` (units of `c`, components along forward, left, up)
+    /// relative to this one: a pure Lorentz boost (`docs/physics.md` § "Boosted observers"),
+    /// `e'_(0) = γ (e_(0) + β n̂ⁱ e_(i))`, `e'_(j) = e_(j) + n̂_j [(γ − 1) n̂ⁱ e_(i) + γ β e_(0)]`.
+    /// The new spatial legs are the old ones carried along by the boost, so the view keeps its orientation
+    /// (directions perpendicular to the motion are unchanged). Returns `None` unless `|β| < 1`.
+    pub fn boosted(&self, beta: &[T; 3]) -> Option<Self> {
+        let b2 = beta[0] * beta[0] + beta[1] * beta[1] + beta[2] * beta[2];
+        if b2.is_nan() || b2 >= T::one() {
+            return None;
+        }
+        if b2 <= T::zero() {
+            return Some(*self);
+        }
+        let b = b2.sqrt();
+        let gamma = T::one() / (T::one() - b2).sqrt();
+        let n = beta.map(|c| c / b);
+        let e = &self.e_up;
+        // Σ_i n̂ⁱ e_(i)
+        let along: Vec4<T> =
+            core::array::from_fn(|mu| (0..3).fold(T::zero(), |s, i| s + n[i] * e[i + 1][mu]));
+        let mut out = *e;
+        out[0] = core::array::from_fn(|mu| gamma * (e[0][mu] + b * along[mu]));
+        for j in 0..3 {
+            out[j + 1] = core::array::from_fn(|mu| {
+                e[j + 1][mu] + n[j] * ((gamma - T::one()) * along[mu] + gamma * b * e[0][mu])
+            });
+        }
+        Some(Self { e_up: out })
+    }
+
     /// Largest deviation `|g(e_a, e_b) − η_ab|` (diagnostic for re-orthonormalisation).
     pub fn orthonormality_error(&self, g_lo: &Mat4<T>) -> T {
         let mut worst = T::zero();
@@ -166,7 +196,49 @@ mod tests {
         }
     }
 
+    #[test]
+    fn boost_gives_relativistic_doppler_in_flat_space() {
+        // M = 0 limit via the Minkowski tetrad: an observer moving forward with speed β sees a source straight
+        // ahead (direction n = forward) blueshifted by g = sqrt((1 + β)/(1 − β)) and one behind redshifted by the
+        // inverse (special-relativistic Doppler, e.g. Rindler, "Relativity: Special, General, and Cosmological"
+        // §4.3). Here g = 1/p_t for p = η(−e'_(0) + n e'_(i)) (`docs/PRD.md` §5.7).
+        let g = eta::<f64>();
+        let t = Tetrad::gram_schmidt(&g, &crate::linalg::identity()).unwrap();
+        let beta = 0.6;
+        let b = t.boosted(&[beta, 0.0, 0.0]).unwrap();
+        assert!(b.orthonormality_error(&g) < 1e-15);
+        let shift = |n: [f64; 3]| {
+            let k = b.to_coordinate(&[-1.0, n[0], n[1], n[2]]);
+            1.0 / crate::linalg::lower(&g, &k)[0]
+        };
+        let expect = ((1.0 + beta) / (1.0 - beta)).sqrt();
+        assert!((shift([1.0, 0.0, 0.0]) - expect).abs() < 1e-14);
+        assert!((shift([-1.0, 0.0, 0.0]) - 1.0 / expect).abs() < 1e-14);
+        // Perpendicular legs are untouched by a boost along forward.
+        assert_eq!(b.e_up[2], t.e_up[2]);
+        assert_eq!(b.e_up[3], t.e_up[3]);
+        assert!(t.boosted(&[0.8, 0.6, 0.0]).is_none());
+        assert_eq!(t.boosted(&[0.0; 3]), Some(t));
+    }
+
     proptest! {
+        #[test]
+        fn boosted_tetrad_is_orthonormal_in_kerr((a, pos) in event(), v in proptest::array::uniform3(-0.55..0.55_f64)) {
+            // |β| < 0.96 here, γ ≤ 3.6; the boost mixes legs with weights ≤ γ², so errors stay at a few ε · γ² · |g|.
+            let k = Kerr::new(a).unwrap();
+            let g = k.g_lo(&pos);
+            let g_up = k.g_up(&pos);
+            let n = [-g_up[0][0], -g_up[1][0], -g_up[2][0], -g_up[3][0]];
+            let z = 0.0;
+            let seeds = [n, [z, 1.0, z, z], [z, z, 1.0, z], [z, z, z, 1.0]];
+            let t = Tetrad::gram_schmidt(&g, &seeds).unwrap();
+            let b = t.boosted(&v).unwrap();
+            prop_assert!(b.orthonormality_error(&g) < 1e-11);
+            // e'_(0) has the requested velocity relative to e_(0): γ = −g(u, u').
+            let gamma = 1.0 / (1.0 - v.iter().map(|c| c * c).sum::<f64>()).sqrt();
+            prop_assert!((-inner(&g, &t.u(), &b.u()) - gamma).abs() < 1e-11 * gamma);
+        }
+
         #[test]
         fn gram_schmidt_is_orthonormal_in_kerr((a, pos) in event(), v in proptest::array::uniform3(-0.5..0.5_f64)) {
             // Observer u = n + w (0, v): n^μ = −g^{μt} is the KS-normal observer (∇t is timelike everywhere in
