@@ -63,6 +63,20 @@ impl<T: Real> Tetrad<T> {
         core::array::from_fn(|mu| (0..4).fold(T::zero(), |s, a| s + c[a] * self.e_up[a][mu]))
     }
 
+    /// Tetrad with the spatial legs rotated by the SO(3) matrix `rot` (`e_(0)` unchanged):
+    /// `e'_(i) = Σ_j rot[j][i] e_(j)`, i.e. column `i` of `rot` holds the new leg `i` in the old frame
+    /// (forward, left, up). Used for the user look rotation (`docs/PRD.md` §5.8), which is not a physical
+    /// rotation. A vector with components `v'` in the rotated frame has components `rot · v'` in the original one.
+    pub fn rotated(&self, rot: &[[T; 3]; 3]) -> Self {
+        let mut e = self.e_up;
+        for i in 0..3 {
+            e[i + 1] = core::array::from_fn(|mu| {
+                (0..3).fold(T::zero(), |s, j| s + rot[j][i] * self.e_up[j + 1][mu])
+            });
+        }
+        Self { e_up: e }
+    }
+
     /// Largest deviation `|g(e_a, e_b) − η_ab|` (diagnostic for re-orthonormalisation).
     pub fn orthonormality_error(&self, g_lo: &Mat4<T>) -> T {
         let mut worst = T::zero();
@@ -118,6 +132,38 @@ mod tests {
             [0.0, 0.0, 0.0, 1.0],
         ];
         assert!(Tetrad::gram_schmidt(&g, &degenerate).is_none());
+    }
+
+    #[test]
+    fn rotation_keeps_orthonormality_and_handedness() {
+        // Kerr a = 0.9 static observer at r ≈ 12; rotate by 40° about "up", then 25° about "forward".
+        let k = Kerr::new(0.9_f64).unwrap();
+        let pos = [0.0, 7.0, 6.0, 8.0];
+        let g = k.g_lo(&pos);
+        let seeds = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let t = Tetrad::gram_schmidt(&g, &seeds).unwrap();
+        let (s1, c1) = 40.0_f64.to_radians().sin_cos();
+        let (s2, c2) = 25.0_f64.to_radians().sin_cos();
+        let yaw = [[c1, -s1, 0.0], [s1, c1, 0.0], [0.0, 0.0, 1.0]];
+        let roll = [[1.0, 0.0, 0.0], [0.0, c2, -s2], [0.0, s2, c2]];
+        let rot: [[f64; 3]; 3] =
+            core::array::from_fn(|i| core::array::from_fn(|j| (0..3).map(|k| yaw[i][k] * roll[k][j]).sum()));
+        let r = t.rotated(&rot);
+        assert!(r.orthonormality_error(&g) < 1e-13);
+        assert_eq!(r.e_up[0], t.e_up[0]);
+        // Orientation preserved: det e_up has the same sign (positive for a right-handed, future tetrad).
+        assert!(crate::linalg::determinant(&t.e_up) > 0.0);
+        assert!(crate::linalg::determinant(&r.e_up) > 0.0);
+        // New forward leg = cos40° forward + sin40° left (column 0 of rot).
+        let expect = t.to_coordinate(&[0.0, rot[0][0], rot[1][0], rot[2][0]]);
+        for mu in 0..4 {
+            assert!((r.e_up[1][mu] - expect[mu]).abs() < 1e-14);
+        }
     }
 
     proptest! {
