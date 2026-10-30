@@ -96,6 +96,55 @@ impl Default for ObserverSpec {
     }
 }
 
+impl ObserverSpec {
+    /// Places the preset observer in `kerr` (no boost or look rotation).
+    ///
+    /// # Errors
+    /// [`RenderError::InvalidScene`] for non-finite coordinates; [`RenderError::Observer`] if the preset cannot be
+    /// realised (e.g. hovering inside the ergosphere) or lies outside the radii allowed by `params`.
+    pub fn place(
+        &self,
+        kerr: &Kerr<f64>,
+        params: &ObserverParams<f64>,
+    ) -> Result<Observer<f64>, RenderError> {
+        let (th, ph) = (self.theta_deg.to_radians(), self.phi_deg.to_radians());
+        if !(self.r.is_finite() && th.is_finite() && ph.is_finite()) {
+            return Err(RenderError::InvalidScene(
+                "observer r, theta_deg, phi_deg must be finite".into(),
+            ));
+        }
+        let obs = match self.preset {
+            PresetKind::Hover => Observer::hover(kerr, self.r, th, ph, params),
+            PresetKind::Zamo => Observer::zamo(kerr, self.r, th, ph, params),
+            PresetKind::CircularOrbit => Observer::circular_orbit(kerr, self.r, self.prograde, ph, params),
+            PresetKind::RadialInfall => Observer::radial_infall(kerr, self.r, th, ph, params),
+        }?;
+        Ok(obs)
+    }
+
+    /// Places the preset observer and applies [`ObserverSpec::boost`] to its tetrad. A boosted observer no longer
+    /// follows the station-keeping orbit, so its motion becomes [`gravography_physics::Motion::Free`].
+    ///
+    /// # Errors
+    /// As [`ObserverSpec::place`]; [`RenderError::InvalidScene`] unless `|β| < 1`.
+    pub fn place_boosted(
+        &self,
+        kerr: &Kerr<f64>,
+        params: &ObserverParams<f64>,
+    ) -> Result<Observer<f64>, RenderError> {
+        let mut obs = self.place(kerr, params)?;
+        let boost = self.boost;
+        obs.tetrad = obs
+            .tetrad
+            .boosted(&boost)
+            .ok_or_else(|| RenderError::InvalidScene(format!("boost {boost:?} must have |β| < 1")))?;
+        if boost.iter().any(|b| b.abs() > 0.0) {
+            obs.release();
+        }
+        Ok(obs)
+    }
+}
+
 /// Look rotation in degrees, applied as yaw (about up, positive turns left), then pitch (about the new left,
 /// positive looks up), then roll (about the new forward, positive turns the view clockwise).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -252,22 +301,7 @@ impl Scene {
     /// # Errors
     /// Invalid spin, or the preset cannot be realised (e.g. hovering inside the ergosphere).
     pub fn observer(&self) -> Result<Observer<f64>, RenderError> {
-        let kerr = self.kerr()?;
-        let o = &self.observer;
-        let params = ObserverParams::default();
-        let (th, ph) = (o.theta_deg.to_radians(), o.phi_deg.to_radians());
-        if !(o.r.is_finite() && th.is_finite() && ph.is_finite()) {
-            return Err(RenderError::InvalidScene(
-                "observer r, theta_deg, phi_deg must be finite".into(),
-            ));
-        }
-        let obs = match o.preset {
-            PresetKind::Hover => Observer::hover(&kerr, o.r, th, ph, &params),
-            PresetKind::Zamo => Observer::zamo(&kerr, o.r, th, ph, &params),
-            PresetKind::CircularOrbit => Observer::circular_orbit(&kerr, o.r, o.prograde, ph, &params),
-            PresetKind::RadialInfall => Observer::radial_infall(&kerr, o.r, th, ph, &params),
-        }?;
-        Ok(obs)
+        self.observer.place(&self.kerr()?, &ObserverParams::default())
     }
 
     /// Frame parameters: observer tetrad with boost and look rotation applied, camera and render settings.
@@ -276,13 +310,8 @@ impl Scene {
     /// Any invalid value (spin, observer, boost `|β| ≥ 1`, image size, samples, projection).
     pub fn frame(&self) -> Result<FrameParams, RenderError> {
         let kerr = self.kerr()?;
-        let obs = self.observer()?;
-        let boost = self.observer.boost;
-        let tetrad = obs
-            .tetrad
-            .boosted(&boost)
-            .ok_or_else(|| RenderError::InvalidScene(format!("boost {boost:?} must have |β| < 1")))?
-            .rotated(&self.observer.look.matrix());
+        let obs = self.observer.place_boosted(&kerr, &ObserverParams::default())?;
+        let tetrad = obs.tetrad.rotated(&self.observer.look.matrix());
         let frame = FrameParams {
             kerr,
             position: obs.pos,
@@ -432,6 +461,24 @@ mod tests {
             [0.0, any[2][0], any[2][1], any[2][2]],
         ];
         assert_relative_eq!(determinant(&m4), 1.0, epsilon = 1e-14);
+    }
+
+    #[test]
+    fn boosted_placement_releases_station_keeping() {
+        let kerr = Kerr::new(0.5).unwrap();
+        let params = ObserverParams::default();
+        let spec = ObserverSpec::default();
+        let still = spec.place_boosted(&kerr, &params).unwrap();
+        assert!(matches!(still.motion, gravography_physics::Motion::Hover { .. }));
+        assert_eq!(still, spec.place(&kerr, &params).unwrap());
+        let moving = ObserverSpec {
+            boost: [0.0, 0.3, 0.0],
+            ..spec
+        }
+        .place_boosted(&kerr, &params)
+        .unwrap();
+        assert_eq!(moving.motion, gravography_physics::Motion::Free);
+        assert_eq!(moving.pos, still.pos);
     }
 
     #[test]

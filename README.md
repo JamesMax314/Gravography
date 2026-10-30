@@ -7,8 +7,9 @@ Written in Rust with `wgpu`; macOS (Apple Silicon) is the primary platform.
 **Status:** early development. The CPU physics (geodesics, observers), the sky model (colour science, star
 field, cube-map baking) and a CPU f64 reference renderer with a headless `render` command are implemented and
 tested. The GPU backend renders the same images as the CPU reference (PRD tests 15 and 16) in about a second,
-with FR-R6 debug views. A first interactive viewer (fixed camera, progressive refinement, settings panel,
-screenshots) runs on macOS; flight controls arrive in WP-11. See `docs/PRD.md` for the specification and
+with FR-R6 debug views. The interactive viewer runs on macOS: free flight with thrust, mouse look, presets, time
+warp, a HUD, a live spin slider and effect toggles, with progressive refinement whenever the view is still.
+Performance tuning (dynamic resolution) is WP-12. See `docs/PRD.md` for the specification and
 `docs/progress_report.md` for progress.
 
 ## Building
@@ -39,12 +40,50 @@ cargo run --release -p gravography-app                                   # defau
 cargo run --release -p gravography-app -- --scene scenes/kerr_edge_on.toml
 ```
 
-The view refines progressively (one jittered sample per frame up to the sample target, then it idles). The left
-panel sets the sample target, the render scale (internal resolution as a fraction of the window; default 0.5),
-auto/manual exposure with EV and the tone-map operator. **P** (or the panel button) saves a screenshot rendered to
-convergence at the full window resolution: a tone-mapped PNG and a linear HDR EXR in `screenshots/` (change with
-`--screenshot-dir`). **Esc** quits. `--smoke-test` runs a scripted check (render, screenshot, resize, render,
-screenshot, exit) for automated verification.
+The observer starts at the scene's `[observer]` (preset, boost, look) and is simulated in real time: each frame
+advances its proper time by the frame time × the **time warp** (in `M` per second), integrating its worldline and
+Fermi–Walker-transported frame on the CPU in f64. While the view moves, every frame is a fresh one-sample image;
+once it is still, samples accumulate up to the sample target.
+
+| Input | Action |
+|---|---|
+| drag (left mouse) | look around (a view rotation, not a physical one) |
+| **W / S**, **A / D**, **R / F** | thrust forward/back, left/right, up/down, relative to where you look |
+| **Space** | cut thrust: stop station keeping and fall freely |
+| **Enter** | pause / resume; **.** single step while paused |
+| **[ / ]** | halve / double the time warp |
+| **- / =** | halve / double the thrust |
+| **P** | screenshot (tone-mapped PNG + linear HDR EXR at full window resolution, in `screenshots/` or `--screenshot-dir`) |
+| **Esc** | quit |
+
+The left panel has these sections:
+
+- **Flight:** pause and step, time warp, thrust magnitude (`c²/M`), black-hole mass in solar masses (only used to
+  show accelerations in g), cut thrust and reset look.
+- **Presets:** hover, ZAMO, circular orbit (prograde or retrograde) and radial infall at chosen `r`, `θ`, `φ`.
+  Impossible presets are disabled with an explanation, for example hovering inside the ergosphere or an orbit
+  below the photon orbit. Orbits below the ISCO get a warning.
+- **Spacetime:** the spin slider, usable in flight. It keeps the position and velocity.
+- **Effects:** lensing, frequency shift and beaming, each switchable.
+- **Render:** sample target, render scale (default 0.5), auto/manual exposure, tone map and screenshot.
+
+The **HUD** (top right) shows:
+
+- proper time `τ`, KS time `t`;
+- BL `r, θ, φ`;
+- speed and Lorentz factor relative to the local ZAMO;
+- the felt acceleration (in `c²/M` and in g);
+- the region (outside the ergosphere, in the ergosphere, inside the horizon);
+- the spin, the frame rate and the render size;
+- the ray-status rates.
+
+Thrust keys switch a hovering or ZAMO observer to free flight. Crossing the horizon is allowed. The simulation
+stops near the singularity (Schwarzschild, `r < 0.05 M`) or the inner horizon (Kerr), or beyond `r = 200 M`. It
+then resets to the last preset, paused, with a message.
+
+`--smoke-test` runs a scripted check for automated verification. It renders, takes a screenshot, resizes the
+window, renders and takes a screenshot again. It then sets `a = 0.5`, falls from `r = 8` through the horizon,
+takes a screenshot inside and exits.
 
 ## Headless rendering
 

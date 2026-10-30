@@ -1,10 +1,14 @@
-//! The egui settings panel (scaffolding for WP-11): render settings, exposure, status and the screenshot button.
+//! The egui panels: the left settings panel (flight, presets, spacetime, effects, render, exposure) and the HUD
+//! (`docs/PRD.md` FR-O2–FR-O5, §6.4). The panel edits plain copies of the state; the viewer applies the changes.
 
+use gravography_physics::{Motion, Region};
 use gravography_render::ToneMap;
+use gravography_render::scene::{MAX_SPIN, ObserverSpec, PresetKind};
 
+use super::flight::{FlightSettings, Hud, PresetCheck, THRUST_RANGE, WARP_RANGE, preset_name};
 use super::state::{MAX_SAMPLE_TARGET, RENDER_SCALE_RANGE, ViewSettings};
 
-/// Read-only status shown in the panel.
+/// Read-only status shown in the panel and HUD.
 #[derive(Clone, Debug, Default)]
 pub struct Status {
     /// GPU description.
@@ -17,8 +21,22 @@ pub struct Status {
     pub samples: (u32, u32),
     /// Exposure scale in use.
     pub exposure_scale: f64,
-    /// Last message (screenshot saved, errors).
+    /// Fractions of rays per status (escaped, captured, singular, max steps, error) from the last statistics
+    /// readback.
+    pub ray_rates: Option<[f64; 5]>,
+    /// Last message (screenshot saved, mode switches, resets, errors).
     pub message: String,
+}
+
+/// Editable copies of the flight controls.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FlightPanel {
+    /// Time warp, pause, thrust, mass.
+    pub settings: FlightSettings,
+    /// Spin slider value.
+    pub spin: f64,
+    /// Preset being edited (applied with the button).
+    pub editor: ObserverSpec,
 }
 
 /// Actions requested from the panel.
@@ -26,63 +44,298 @@ pub struct Status {
 pub struct Actions {
     /// Take a screenshot.
     pub screenshot: bool,
+    /// Apply the edited preset.
+    pub apply_preset: bool,
+    /// Cut thrust / release station keeping.
+    pub release: bool,
+    /// Single step (while paused).
+    pub step: bool,
+    /// Reset the look rotation.
+    pub reset_look: bool,
 }
 
-/// Draws the panel, editing `settings` in place.
-pub fn settings_panel(ui: &mut egui::Ui, settings: &mut ViewSettings, status: &Status) -> Actions {
+/// Draws the left panel, editing `settings` and `flight` in place. `check` is the validity of `flight.editor`.
+pub fn settings_panel(
+    ui: &mut egui::Ui,
+    settings: &mut ViewSettings,
+    flight: &mut FlightPanel,
+    check: &PresetCheck,
+    status: &Status,
+) -> Actions {
     let mut actions = Actions::default();
-    ui.heading("Gravography");
-    ui.label(&status.gpu);
-    ui.separator();
-
-    ui.label("Render");
-    ui.add(
-        egui::Slider::new(&mut settings.samples, 1..=MAX_SAMPLE_TARGET)
-            .text("samples")
-            .logarithmic(true),
-    );
-    ui.add(
-        egui::Slider::new(
-            &mut settings.render_scale,
-            RENDER_SCALE_RANGE.0..=RENDER_SCALE_RANGE.1,
-        )
-        .text("render scale"),
-    );
-    ui.separator();
-
-    ui.label("Exposure");
-    ui.checkbox(&mut settings.exposure.auto, "auto exposure");
-    let label = if settings.exposure.auto {
-        "EV compensation"
-    } else {
-        "EV"
-    };
-    ui.add(egui::Slider::new(&mut settings.exposure.ev, -12.0..=12.0).text(label));
-    egui::ComboBox::from_label("tone map")
-        .selected_text(match settings.tone_map {
-            ToneMap::Aces => "ACES",
-            ToneMap::Reinhard => "Reinhard",
-        })
-        .show_ui(ui, |ui| {
-            ui.selectable_value(&mut settings.tone_map, ToneMap::Aces, "ACES");
-            ui.selectable_value(&mut settings.tone_map, ToneMap::Reinhard, "Reinhard");
-        });
-    ui.separator();
-
-    if ui.button("Screenshot (P)").clicked() {
-        actions.screenshot = true;
-    }
-    ui.separator();
-    ui.label(format!("{:.1} fps", status.fps));
-    ui.label(format!(
-        "render {}×{}",
-        status.render_size.0, status.render_size.1
-    ));
-    ui.label(format!("samples {}/{}", status.samples.0, status.samples.1));
-    ui.label(format!("exposure scale {:.3e}", status.exposure_scale));
-    if !status.message.is_empty() {
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        ui.heading("Gravography");
+        ui.label(&status.gpu);
         ui.separator();
-        ui.label(&status.message);
-    }
+        flight_section(ui, flight, &mut actions);
+        preset_section(ui, &mut flight.editor, check, &mut actions);
+        ui.collapsing("Spacetime", |ui| {
+            ui.add(
+                egui::Slider::new(&mut flight.spin, 0.0..=MAX_SPIN)
+                    .text("spin a/M")
+                    .fixed_decimals(3),
+            );
+            ui.small("Changing spin keeps the position and velocity; invalid states reset.");
+        });
+        ui.collapsing("Effects", |ui| {
+            ui.checkbox(&mut settings.effects.lensing, "gravitational lensing");
+            ui.checkbox(&mut settings.effects.frequency_shift, "frequency shift");
+            ui.checkbox(&mut settings.effects.beaming, "intensity beaming");
+        });
+        render_section(ui, settings, &mut actions);
+        ui.separator();
+        ui.collapsing("Keys", |ui| {
+            for line in [
+                "drag: look around",
+                "W/S A/D R/F: thrust fwd/back, left/right, up/down",
+                "Space: cut thrust (free fall)",
+                "Enter: pause   .: step   [ ]: time warp",
+                "- =: thrust   P: screenshot   Esc: quit",
+            ] {
+                ui.small(line);
+            }
+        });
+        if !status.message.is_empty() {
+            ui.separator();
+            ui.label(&status.message);
+        }
+    });
     actions
+}
+
+fn flight_section(ui: &mut egui::Ui, flight: &mut FlightPanel, actions: &mut Actions) {
+    egui::CollapsingHeader::new("Flight")
+        .default_open(true)
+        .show(ui, |ui| {
+            let s = &mut flight.settings;
+            ui.horizontal(|ui| {
+                let label = if s.paused { "▶ Resume" } else { "⏸ Pause" };
+                if ui.button(label).clicked() {
+                    s.paused = !s.paused;
+                }
+                if ui.add_enabled(s.paused, egui::Button::new("Step")).clicked() {
+                    actions.step = true;
+                }
+            });
+            ui.add(
+                egui::Slider::new(&mut s.time_warp, WARP_RANGE.0..=WARP_RANGE.1)
+                    .logarithmic(true)
+                    .text("time warp (M/s)"),
+            );
+            ui.add(
+                egui::Slider::new(&mut s.thrust, THRUST_RANGE.0..=THRUST_RANGE.1)
+                    .logarithmic(true)
+                    .text("thrust (c²/M)"),
+            );
+            ui.add(
+                egui::Slider::new(&mut s.mass_solar, 1.0..=1e10)
+                    .logarithmic(true)
+                    .text("mass (M☉)"),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Cut thrust").clicked() {
+                    actions.release = true;
+                }
+                if ui.button("Reset look").clicked() {
+                    actions.reset_look = true;
+                }
+            });
+        });
+}
+
+fn preset_section(ui: &mut egui::Ui, spec: &mut ObserverSpec, check: &PresetCheck, actions: &mut Actions) {
+    egui::CollapsingHeader::new("Presets")
+        .default_open(true)
+        .show(ui, |ui| {
+            egui::ComboBox::from_label("preset")
+                .selected_text(preset_name(spec.preset))
+                .show_ui(ui, |ui| {
+                    for kind in [
+                        PresetKind::Hover,
+                        PresetKind::Zamo,
+                        PresetKind::CircularOrbit,
+                        PresetKind::RadialInfall,
+                    ] {
+                        ui.selectable_value(&mut spec.preset, kind, preset_name(kind));
+                    }
+                });
+            ui.add(
+                egui::Slider::new(&mut spec.r, 0.05..=200.0)
+                    .logarithmic(true)
+                    .text("r (M)"),
+            );
+            if spec.preset == PresetKind::CircularOrbit {
+                ui.checkbox(&mut spec.prograde, "prograde");
+            } else {
+                ui.add(egui::Slider::new(&mut spec.theta_deg, 0.0..=180.0).text("θ (°)"));
+            }
+            ui.add(egui::Slider::new(&mut spec.phi_deg, -180.0..=180.0).text("φ (°)"));
+            if ui
+                .add_enabled(check.error.is_none(), egui::Button::new("Apply preset"))
+                .clicked()
+            {
+                actions.apply_preset = true;
+            }
+            if let Some(e) = &check.error {
+                ui.colored_label(ui.visuals().error_fg_color, e);
+            } else if let Some(w) = &check.warning {
+                ui.colored_label(ui.visuals().warn_fg_color, w);
+            }
+        });
+}
+
+fn render_section(ui: &mut egui::Ui, settings: &mut ViewSettings, actions: &mut Actions) {
+    ui.collapsing("Render", |ui| {
+        ui.add(
+            egui::Slider::new(&mut settings.samples, 1..=MAX_SAMPLE_TARGET)
+                .text("samples")
+                .logarithmic(true),
+        );
+        ui.add(
+            egui::Slider::new(
+                &mut settings.render_scale,
+                RENDER_SCALE_RANGE.0..=RENDER_SCALE_RANGE.1,
+            )
+            .text("render scale"),
+        );
+        ui.checkbox(&mut settings.exposure.auto, "auto exposure");
+        let label = if settings.exposure.auto {
+            "EV compensation"
+        } else {
+            "EV"
+        };
+        ui.add(egui::Slider::new(&mut settings.exposure.ev, -12.0..=12.0).text(label));
+        egui::ComboBox::from_label("tone map")
+            .selected_text(match settings.tone_map {
+                ToneMap::Aces => "ACES",
+                ToneMap::Reinhard => "Reinhard",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut settings.tone_map, ToneMap::Aces, "ACES");
+                ui.selectable_value(&mut settings.tone_map, ToneMap::Reinhard, "Reinhard");
+            });
+        if ui.button("Screenshot (P)").clicked() {
+            actions.screenshot = true;
+        }
+    });
+}
+
+/// Human-readable region name (FR-O4).
+pub fn region_name(region: Region) -> &'static str {
+    match region {
+        Region::OutsideErgosphere => "outside the ergosphere",
+        Region::Ergosphere => "in the ergosphere",
+        Region::InsideHorizon => "inside the horizon",
+    }
+}
+
+/// Human-readable motion mode.
+pub fn motion_name(motion: &Motion<f64>) -> &'static str {
+    match motion {
+        Motion::Free => "free",
+        Motion::Hover { .. } => "hovering (auto thrust)",
+        Motion::Zamo { .. } => "ZAMO (auto thrust)",
+    }
+}
+
+/// HUD text lines (FR-O4), separated from drawing so they can be tested.
+pub fn hud_lines(hud: &Hud, status: &Status, settings: &FlightSettings, render_scale: f32) -> Vec<String> {
+    let mut lines = vec![
+        format!("τ = {:.3} M   t = {:.3} M (KS)", hud.tau, hud.t_ks),
+        format!(
+            "r = {:.4} M   θ = {:.2}°   φ = {}",
+            hud.r,
+            hud.theta_deg,
+            hud.phi_deg
+                .map_or_else(|| "—".to_string(), |p| format!("{p:.2}°"))
+        ),
+        match hud.zamo_speed {
+            Some((beta, gamma)) => format!("v vs ZAMO = {beta:.5} c   γ = {gamma:.5}"),
+            None => "v vs ZAMO: — (no ZAMOs inside the horizon)".to_string(),
+        },
+        format!(
+            "acceleration {:.3e} c²/M = {:.3e} g ({} M☉)",
+            hud.acceleration, hud.acceleration_g, settings.mass_solar
+        ),
+        format!("{}, {}", region_name(hud.region), motion_name(&hud.motion)),
+        format!(
+            "a = {:.3}   warp {:.3} M/s{}",
+            hud.spin,
+            settings.time_warp,
+            if settings.paused { "   PAUSED" } else { "" }
+        ),
+        format!(
+            "{:.0} fps   scale {:.2} ({}×{})   samples {}/{}",
+            status.fps,
+            render_scale,
+            status.render_size.0,
+            status.render_size.1,
+            status.samples.0,
+            status.samples.1
+        ),
+    ];
+    if let Some(r) = status.ray_rates {
+        lines.push(format!(
+            "rays: escaped {:.1}%  captured {:.1}%  max-steps {:.2}%  singular {:.2}%  error {:.2}%",
+            100.0 * r[0],
+            100.0 * r[1],
+            100.0 * r[3],
+            100.0 * r[2],
+            100.0 * r[4]
+        ));
+    }
+    lines
+}
+
+/// Draws the HUD in the top-right corner.
+pub fn hud_window(ctx: &egui::Context, lines: &[String]) {
+    egui::Window::new("HUD")
+        .anchor(egui::Align2::RIGHT_TOP, [-8.0, 8.0])
+        .resizable(false)
+        .collapsible(true)
+        .show(ctx, |ui| {
+            for l in lines {
+                ui.monospace(l);
+            }
+        });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::flight::{Flight, safe_preset};
+    use super::super::input::ThrustKeys;
+    use super::*;
+    use gravography_physics::Kerr;
+
+    #[test]
+    fn hud_shows_every_fr_o4_item() {
+        let f = Flight::new(Kerr::new(0.5).unwrap(), &safe_preset()).unwrap();
+        let hud = Hud::new(&f, &ThrustKeys::default());
+        let status = Status {
+            fps: 60.0,
+            render_size: (640, 360),
+            samples: (3, 16),
+            ray_rates: Some([0.9, 0.1, 0.0, 0.0, 0.0]),
+            ..Status::default()
+        };
+        let text = hud_lines(&hud, &status, &f.settings, 0.5).join("\n");
+        for needle in [
+            "τ =",
+            "t =",
+            "r = 30.0000",
+            "θ = 90.00°",
+            "φ =",
+            "v vs ZAMO",
+            "γ =",
+            " g (10 M☉)",
+            "outside the ergosphere",
+            "hovering",
+            "a = 0.500",
+            "60 fps",
+            "scale 0.50",
+            "escaped 90.0%",
+        ] {
+            assert!(text.contains(needle), "missing {needle:?} in\n{text}");
+        }
+    }
 }

@@ -388,6 +388,38 @@ future-directed. Of the positive roots (inside the ergosphere both can be positi
 `ω` or refused (e.g. a hover point that is now inside the ergosphere). On error the state is unchanged, and the
 app should reset to a safe preset.
 
+### Interactive flight (viewer)
+
+Code: `crates/gravography-app/src/viewer/flight.rs` and `input.rs` (WP-11).
+
+- **Time:** each frame advances `τ` by `Δτ = Δt_wall · w`, with the time warp `w` in `M` of proper time per
+  wall-clock second. `Δt_wall` is clamped to 0.1 s. Physical scale: `1 M = G M/c³ ≈ 4.93 µs · (M/M_☉)`, so even
+  `w = 1000 M/s` is far slower than real time for a stellar-mass hole.
+- **Thrust:** the held keys give a unit direction `d̂'` in the view frame (forward, left, up). Diagonals are
+  normalised. The body-frame thrust is `Aⁱ = |A| (R d̂')ⁱ`, with the look rotation `R` as above. Since
+  `A = Aⁱ e_(i)` and the spatial legs are orthonormal, the felt acceleration `sqrt(g(A, A))` equals the slider
+  value `|A|` (tested).
+- **Station keeping vs thrust:** hover and ZAMO observers ignore user thrust. A thrust key (or Space, "cut
+  thrust") switches to `Motion::Free`, continuing from the current state.
+- **HUD:**
+  - speed relative to the local ZAMO: `γ = −g(u, u_ZAMO)`, `β = sqrt(1 − 1/γ²)`, undefined for `r ≤ r_+`;
+  - felt acceleration: `sqrt(g(A, A))` of the acceleration actually applied (thrust, or the station-keeping
+    acceleration);
+  - BL `r, θ, φ`: BL `φ` diverges on the horizons (`Φ(r)` has a log term), so the HUD shows "—" when it is not
+    finite;
+  - time: the KS `t` (regular everywhere).
+
+  Checks: hover at `r = 30` gives `M/(r² sqrt(1 − 2M/r))`; a circular orbit at `r = 10`, `a = 0` gives
+  `β = sqrt(M/(r − 2M))` relative to the static (= ZAMO) observer (Hartle §9.3).
+- **Camera changes:** accumulation restarts only if the spin, the KS spatial position or a camera-tetrad component
+  changes by more than `1e-9 (1 + |v|)`, compared with the camera of the accumulated image. A Schwarzschild hover
+  observer's state only changes at round-off, so it converges (tested over 600 frames). Slow genuine motion
+  accumulates past the tolerance and restarts. A Kerr static observer's frame precesses (frame dragging), so its
+  view really does rotate slowly.
+- **Limits and resets:** the viewer uses `r_max = 200 M` (the GPU f32 range, PRD §5.9) and `r_min = r_− + 0.05`.
+  An inner/outer limit, an integration failure or an invalid spin change resets the observer to the last applied
+  preset, or to hover at `r = 30` (valid for every `a ≤ 0.999`), and pauses with a message.
+
 ### Validation (PRD §9 tests 9–11, plus Fermi–Walker)
 
 | Test | Result |

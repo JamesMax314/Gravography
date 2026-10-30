@@ -27,3 +27,6 @@ pollster = "1.0.1"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+approx = "0.5.1"

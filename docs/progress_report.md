@@ -6,41 +6,37 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
 
 ## Current state
 
-- WP-00 to WP-10 done.
+- WP-00 to WP-11 done.
   - `gravography-physics`: Kerr–Schild metric and derivatives, Hamiltonian ray tracing (DOPRI5/RK4, termination,
     escape direction, `g = 1/p_t`), BL ↔ KS, radii, invariants, observer dynamics, tetrad boosts (WP-06).
   - `gravography-sky`: CIE 1931 table, Planck spectra, blackbody LUT, XYZ → sRGB, deterministic star catalogue,
     diffuse band, flux-conserving mip-mapped `(w, w·T)` cube map, on-disk cache.
   - `gravography-render` (WP-06): TOML scene files, `FrameParams`, CPU f64 reference renderer (rayon,
     ray-differential footprints, cube-map shading, effect toggles), auto/manual exposure, ACES/Reinhard tone mapping,
-    PNG/EXR output.
-  - `gravography-render::gpu` (WP-07): headless wgpu device (`GpuContext`), WGSL assembly by ordered
-    concatenation (`gpu/shader.rs`, shaders in `gpu/shaders/`), WGSL ports of the KS metric, the Hamiltonian
-    RHS, RK4 and the ray tracer (step caps, termination), and an RK4 test-ray compute pipeline with readback.
-  - `gravography-render::gpu::tracer` (WP-08): per-pixel DOPRI5 trace pass in WGSL (camera rays generated on
-    the GPU), G-buffer `{dir, g, status, steps, rejected}` in a storage buffer, tiled dispatch (256² per
-    submission). `TraceParams::gpu_default()` holds the tuned f32 settings.
-  - `gravography-render::gpu::renderer` (WP-09): sky upload (RG32Float 2D-array cube + LUT buffer), shading
-    pass (neighbour footprint, manual trilinear cube sampling, LUT, accumulation), GPU tone mapping, FR-R6 debug
-    views (status / shift / steps).
-  - `gravography-render::parity` (WP-07): GPU ↔ CPU parity harness (10 fixed cameras, ray grids, status confusion
-    matrix, angular-error quantiles).
+    PNG/EXR output. `ObserverSpec::{place, place_boosted}` (WP-11) build an observer from a preset spec.
+  - `gravography-render::gpu` (WP-07–09): headless/surface wgpu device, WGSL assembly, DOPRI5 per-pixel trace pass,
+    shading, accumulation, tone mapping, debug views, present pass (WP-10).
+  - `gravography-render::parity` (WP-07): GPU ↔ CPU parity harness.
   - `gravography` binary: `gravography render --scene … --out …png|exr [--width --height --samples
-    --backend cpu|gpu --debug status|shift|steps --no-cache]`. The GPU backend renders a 960×540×4 spp scene in
-    about 1 s (the CPU takes 35–75 s). With no subcommand, `gravography` opens the viewer: progressive rendering
-    of a fixed camera, egui settings panel, resizing, P for PNG + EXR screenshots, and `--smoke-test` for
-    scripted checks.
-- PRD §9 tests 1–14 pass, as do FR-X3 (scene round trip) and a renderer lensing validation against the exact
-  Schwarzschild lens map. **PRD test 15 passes**: the GPU per-pixel tracer agrees with the CPU f64 reference
-  on 100% of ray statuses, with 99.97% of escape directions within 1e-3 rad.
-- **PRD test 16 passes:** GPU images match the CPU reference for all `scenes/*.toml`. Total luminance is within
-  0.5%, and at most 3.3% of pixels differ by more than 8 display levels, all of it from the footprint method.
-- **Next work package:** WP-11 — Interactive flight (input → thrust, per-frame observer integration, presets,
-  time warp, HUD, spin slider, effect toggles).
+    --backend cpu|gpu --debug status|shift|steps --no-cache]`. With no subcommand, `gravography` opens the
+    **interactive viewer** (WP-10/11):
+    - free flight with WASD/RF thrust relative to the view, mouse-drag look, Space to cut thrust;
+    - presets (hover, ZAMO, circular orbit, radial infall) with validity checks;
+    - time warp, pause and single step;
+    - a HUD (FR-O4), a live spin slider and effect toggles;
+    - progressive refinement whenever the view is still, P for screenshots, and `--smoke-test` for scripted checks,
+      including a fall through the horizon.
+- PRD §9 tests 1–16 pass, as do FR-X3 (scene round trip) and a renderer lensing validation.
+- **Next work package:** WP-12 — Performance (GPU timing, dynamic resolution, progressive refinement, integrator
+  tuning, optional Schwarzschild fast path; measure NF-1).
 - Toolchain: rustup, Rust **1.99.1** (`rust-toolchain.toml`).
 - The user approved shipping the CC BY-SA 4.0 CIE table (2026-10-30; see `THIRD_PARTY.md`).
+- The user confirmed (2026-10-30) that the WP-10 viewer window opens and resizes correctly, but that **going full
+  screen is laggy**. The cause is analysed under WP-11 "Known issues"; the fix belongs to WP-12.
 - Open questions for the user:
   - The example scenes use auto exposure with −2 EV (−4 EV inside the horizon), chosen by eye. Adjust to taste.
+  - Please try the WP-11 manual checklist items marked **user** (live mouse look, keyboard focus, the feel of the
+    controls). The agent cannot see or drive the live window.
 
 ---
 
@@ -59,7 +55,7 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
 | WP-08 | GPU ray tracer | done | `wp-08` |
 | WP-09 | GPU shading & headless GPU render | done | `wp-09` |
 | WP-10 | Viewer shell | done | `wp-10` |
-| WP-11 | Interactive flight | not started | |
+| WP-11 | Interactive flight | done | `wp-11` |
 | WP-12 | Performance | not started | |
 | WP-13 | v1 polish & release | not started | |
 
@@ -96,6 +92,177 @@ Template for each entry (copy above the previous entry):
 **Notes for the next agent**
 -
 -->
+
+## WP-11 — Interactive flight — 2026-10-30 — COMPLETE
+
+**Summary**
+- **Flight state** (`viewer/flight.rs`, no GPU code, fully unit-tested): `Flight` holds the `Kerr`, the
+  `Observer<f64>`, the look rotation (`LookSpec`), the flight settings and the last applied preset.
+  - `update(dt_wall, keys)`: `Δτ = Δt_wall (≤ 0.1 s) × time warp`, or one `step_tau` when paused and a step was
+    requested.
+  - Thrust is `|A| · R_look · d̂_view` in the body frame. A thrust key releases hover/ZAMO station keeping first.
+  - Limit or integration errors reset to the last preset (or the safe hover at r = 30) and pause, with a message.
+  - `apply_preset` with `check_preset`:
+    - errors: hover inside the ergosurface, ZAMO at or inside `r_+`, an orbit at or below the photon orbit,
+      `r` outside `[r_min, 200]`;
+    - warning: orbits below the ISCO.
+  - `set_spin` uses `Observer::change_spin` and resets on failure. `cut_thrust` is Space.
+  - `look_by`: yaw wraps to (−180°, 180°], pitch is clamped to ±89°.
+- **HUD values** (`Hud`, FR-O4):
+  - τ, KS t;
+  - BL r, θ, φ (φ shown as "—" where it is not finite);
+  - β and γ relative to the ZAMO (none inside the horizon);
+  - the felt acceleration in c²/M and in g (selectable mass);
+  - the region, spin and motion mode.
+
+  The renderer adds fps, scale, size, samples and ray-status rates.
+- **Input** (`viewer/input.rs`): physical-key mapping.
+  - Held: W/S, A/D, R/F.
+  - Once per press: Space cut thrust, Enter pause, `.` step, `[ ]` warp ÷2/×2, `- =` thrust ÷2/×2, P screenshot,
+    Esc quit.
+  - Diagonals are normalised. The drag sensitivity matches the pinhole scale at the image centre ("grab the sky").
+- **Viewer** (`viewer/mod.rs`):
+  - per frame: apply the panel, advance the flight, compare the camera with the accumulated one
+    (`Camera::differs`, relative tolerance 1e-9), restart if it moved, then add one sample;
+  - redraws continuously while running; idles when paused and converged;
+  - key releases always count, and held keys clear on focus loss;
+  - presses are ignored when egui consumes them.
+- **Panel** (`viewer/ui.rs`): Flight, Presets (with the error/warning text and a disabled Apply), Spacetime (spin),
+  Effects (§6.4 toggles), Render (with exposure), a key reference, and the HUD window in the top-right corner.
+- **Exposure while moving:** `Accumulation::meter_exposure_now(since_last)` meters at convergence, and on the
+  first sample only if ≥ 1 s has passed (`METER_INTERVAL`). The same throttle drives the ray-status readback.
+  The last log-average is kept across camera restarts.
+- **Smoke test extended:** after the resize stage it sets a = 0.5 while hovering (must not reset), applies radial
+  infall from r = 8 at 4 M/s, falls until r < 1.5, asserts the HUD region is "inside the horizon", pauses,
+  converges and takes a third screenshot. It prints the HUD at each screenshot.
+- **Render crate:** `ObserverSpec::place` and `place_boosted`, which releases station keeping when boosted.
+  `Scene::observer` and `Scene::frame` now use them (same results).
+
+**Key files/modules**
+- `crates/gravography-app/src/viewer/flight.rs`: `Flight`, `FlightSettings`, `Camera`, `check_preset`,
+  `safe_preset`, `Hud`, `viewer_params` (r_max = 200).
+- `crates/gravography-app/src/viewer/input.rs`: `key_action`, `ThrustKeys`, `degrees_per_pixel`, `drag_to_look`.
+- `crates/gravography-app/src/viewer/ui.rs`: panel sections, `FlightPanel`, `hud_lines`, `hud_window`.
+- `crates/gravography-app/src/viewer/state.rs`: `ViewSettings.effects`, `METER_INTERVAL`.
+- `crates/gravography-app/src/viewer/mod.rs`: event handling, per-frame flight, camera-change restart, smoke test.
+- `crates/gravography-render/src/scene.rs`: `ObserverSpec::{place, place_boosted}`.
+- `docs/physics.md` § "Interactive flight (viewer)"; `README.md` § "Viewer" (controls table).
+
+**Decisions & deviations**
+- **Keys beyond FR-O1:** pause, step, warp and thrust shortcuts are my choice (Enter, `.`, `[ ]`, `- =`). P stays
+  the screenshot key. Physical key codes keep WASD in place on other layouts.
+- **Space = cut thrust:** clears the held thrust keys and releases hover/ZAMO station keeping (free fall). Thrust
+  only acts while keys are held, so "cut thrust" is only meaningful for the automatic station-keeping thrust.
+- **Thrust while station keeping:** the physics ignores user thrust in hover/ZAMO mode, so the first thrust key
+  press switches to free flight (with a message). Otherwise W would silently do nothing.
+- **Resets pause the simulation:** otherwise a radial infall preset would loop endlessly between the preset and
+  the inner limit. The message says "Enter resumes".
+- **Time warp unit:** M of proper time per wall-clock second (default 1, range 1e-3–1e3). The default thrust is
+  0.01 c²/M, about 10× the hover acceleration at r = 30.
+- **Viewer `r_max` = 200 M** (PRD §5.9, the f32 GPU range) instead of the physics default 1000. Scenes start at
+  r ≤ 50.
+- **Mouse look:** drag with the left button, not a captured cursor. Drags that start on the panel do not turn the
+  view. Pitch is clamped to ±89°. Roll from the scene file is kept but there is no roll control.
+- **Effect toggles** live in `ViewSettings` (they reset accumulation), initialised from the scene.
+- **Applying a preset resets the look rotation** to "look at the hole", and ignores the scene's boost. Resets go to
+  the unboosted preset.
+- **Corrected test expectation:** while writing `hud_reports_station_keeping_and_motion` I first expected
+  β = 0.5 for a circular orbit at r = 10. The correct value is `sqrt(M/(r − 2M)) = sqrt(1/8)`; the code was
+  right. No existing test or tolerance changed. `accumulation_progresses_and_meters` was extended for the new
+  `meter_exposure_now` signature.
+- **New dependency:** `approx` as a dev-dependency of `gravography-app` (already used by the other crates). PRD
+  unchanged.
+
+**Tests**
+- `cargo test --workspace`: **228 passed, 3 ignored** (was 208). The ignored tests (`test15_full_resolution`,
+  `test16_larger`, `default_sky_bake_conserves_flux`) were run in release and pass. The scene refactor touches
+  the path they use.
+- New flight tests (20 in the app, 1 in render):
+  - a Schwarzschild hover camera is unchanged after 600 frames (so the viewer converges), and τ = 10 M to 1e-12;
+  - time warp, the frame-time clamp, NaN/negative frame times, pause, single step (exactly one per request);
+  - a thrust key releases hover; felt acceleration = thrust to 1e-12; Δr after 5 M within [0.1, 0.2] M
+    (½ a τ² ≈ 0.14);
+  - thrust follows the look rotation (yaw 90°, pitch 30°) and W thrusts along the camera's forward leg to 1e-14;
+  - yaw wrap and pitch clamp;
+  - preset checks against r_E(θ), r_+, r_ph, r_isco, r_min and r_max, plus "every preset that passes the check
+    can be placed" over a grid;
+  - apply/refuse a preset;
+  - a circular orbit at r = 10, a = 0.5 over ~3 orbits (3600 frames): radius to 1e-6;
+  - radial infall r = 6: crosses the horizon (HUD region, no ZAMO speed), then resets at r_min, paused;
+  - outer-limit reset;
+  - spin change: kept for hover at r = 30; a ZAMO at r = 1.6 with a = 0.9 → a = 0 resets to the safe preset;
+  - HUD: hover acceleration `M/(r² sqrt(1 − 2M/r))` to 1e-12; orbital β = sqrt(1/8) to 1e-12; a scene boost
+    gives γ = 1/sqrt(1 − 0.81);
+  - settings clamping; HUD text contains every FR-O4 item;
+  - key mapping, diagonal normalisation, mouse sensitivity;
+  - `boosted_placement_releases_station_keeping` (render).
+- **Manual test checklist** (✔ = executed by the agent, how; **user** = needs the live window):
+  1. ✔ (smoke) Launch, the default hover view converges, and the HUD shows "hovering (auto thrust)".
+  2. ✔ (unit) W from hover switches to free flight and accelerates toward the hole. **user:** the feel of the
+     thrust magnitude.
+  3. ✔ (unit) Thrust follows the look direction. **user:** drag to look around; dragging on the panel does not turn
+     the view.
+  4. ✔ (unit) Space cuts station keeping and the observer falls.
+  5. ✔ (unit) Enter pauses, `.` steps once, `[ ]` change the warp, `- =` change the thrust (clamped).
+  6. ✔ (unit) Each preset applies. Invalid presets are refused with a reason, and the ISCO warning appears.
+     **user:** the Apply button is disabled and the red/yellow text shows.
+  7. ✔ (smoke + unit) Fall through the horizon: the region changes, the ZAMO speed shows "—", rendering inside
+     works (screenshot), and the inner limit resets and pauses with a message.
+  8. ✔ (smoke + unit) The spin slider works in flight (a = 0 → 0.5 while hovering, no reset). An invalid state
+     resets to a safe preset.
+  9. ✔ (unit) Effect toggles reset accumulation. The GPU path honours them (WP-09 tests). **user:** toggle them
+     and watch.
+  10. ✔ (unit) Outer limit at r = 200 resets.
+  11. **user:** typing in a panel field does not thrust the camera. Switching windows while holding W does not
+      leave the thrust stuck.
+  12. ✔ (launch) `--scene scenes/kerr_edge_on.toml` ran for 10 s with no errors.
+
+**Visual checks**
+- Smoke test on the M2 Pro: hover r = 30 at 2560×1440 and 1920×1152 (as WP-10). Then, after a = 0.5 and infall
+  from r = 8, a screenshot inside the horizon at r = 1.459 M (θ = 90°, dragged to BL φ = 11.2°), τ = 9.76 M.
+  - **What it shows:** the shadow covers most of the 60° view. A thin blue-white, strongly blueshifted crescent
+    of sky lies on the left edge. It matches a headless GPU render of the same preset at that radius, and
+    4% of rays escape.
+  - **An earlier run** reached r = 0.98 before pausing (frame timing differs between runs). There the
+    escaping region was outside the 60° view and the image was entirely black. The headless render at the same r
+    confirms the sky is only at the very edge or beyond, so this was physically expected, not a bug. The smoke test
+    now prints the HUD (including ray rates and the exposure scale) to make this kind of check quick.
+- No live-window inspection (screen capture is not permitted for the agent; see WP-10).
+
+**Performance**
+- Not measured systematically (WP-12). In the smoke test the HUD showed about 70 fps at 960×576 internal
+  (render scale 0.5 of a 1920×1152 window) on the M2 Pro, with the view still and converged. The CPU observer step
+  per frame is negligible.
+- While moving, each frame is a 1-sample image at the internal resolution. Every ≥ 1 s there is an exposure and
+  statistics readback, which causes a short hitch.
+
+**Known issues / tech debt**
+- **Full-screen lag (user report, 2026-10-30).** Entering full screen on macOS delivers a stream of
+  `Resized` events during the animation. Each one reconfigures the surface, reallocates `GpuFrame` and restarts
+  accumulation. The next redraw traces every pixel and, with auto exposure, did a blocking HDR readback before
+  presenting.
+  - **WP-11 does not change the resize path.** A resize is a "hard" restart, which re-meters on the next
+    sample, so the lag is still there. The 1 s throttle only applies to camera moves.
+  - **WP-12 fix:** debounce resizes (present the old image stretched until the size has been stable for about
+    100 ms), and replace the blocking metering with a GPU log-average reduction.
+- **Hitch while moving:** blocking exposure/statistics readbacks about once per second (see Performance).
+- **No dynamic resolution yet:** while moving, the frame rate depends on the render scale (WP-12).
+- **Smoke-test stop radius:** the infall stops at the first frame with r < 1.5, so the final radius depends on
+  the frame rate (0.98–1.46 seen). This is fine for a smoke test. The assertion only requires "inside the
+  horizon".
+- **No roll control and no cursor capture:** these could be added in WP-13 polish if wanted.
+- **`Flight` is not serialisable yet:** bookmarks (FR-O6, WP-13) need a mirror of `Observer` (see WP-04 notes)
+  plus `LookSpec`, `FlightSettings` and the preset.
+
+**Notes for the next agent (WP-12)**
+- **Frame loop:** `Gfx::redraw` in `viewer/mod.rs`. The camera-change test is `self.rendered.is_none_or(|r|
+  cam.differs(&r))`, then `restart(false)`. Dynamic resolution belongs in `restart`/`internal_size`: lower the
+  scale while `update.advanced && moved`, restore it when still.
+- **Per-frame allocations remain:** uniform buffers and bind groups in `render_sample` and `Presenter::draw`.
+- **Throttled readbacks:** `state::METER_INTERVAL` and `Accumulation::meter_exposure_now`. Replace them with a GPU
+  reduction, and keep the "meter at convergence" behaviour for screenshots.
+- **Resize debounce:** see Known issues.
+- **Flight tests:** `cargo test -p gravography-app` runs them in about 0.6 s.
 
 ## WP-10 — Viewer shell — 2026-10-30 — COMPLETE
 
