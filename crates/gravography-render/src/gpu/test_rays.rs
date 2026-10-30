@@ -29,7 +29,7 @@ pub struct GpuTraceParams {
     pub escape_factor: f32,
     /// See [`TraceParams::escape_min_radius`].
     pub escape_min_radius: f32,
-    /// See [`TraceParams::horizon_epsilon`].
+    /// Capture margin above `r_+` for this spin ([`TraceParams::capture_margin`]).
     pub horizon_epsilon: f32,
     /// See [`TraceParams::momentum_blowup`].
     pub momentum_blowup: f32,
@@ -59,7 +59,8 @@ impl GpuTraceParams {
             h_max: p.h_max,
             escape_factor: p.escape_factor,
             escape_min_radius: p.escape_min_radius,
-            horizon_epsilon: p.horizon_epsilon,
+            // Capture margin evaluated for this spin (TraceParams::capture_margin), so WGSL needs no r_ph.
+            horizon_epsilon: p.capture_margin(kerr),
             momentum_blowup: p.momentum_blowup,
             r_singular: p.r_singular,
             max_steps: p.max_steps,

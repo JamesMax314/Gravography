@@ -42,9 +42,76 @@ pub struct BenchArgs {
     /// Override the GPU step budget.
     #[arg(long)]
     pub max_steps: Option<u32>,
+    /// Override the far-field step cap (coordinate displacement ≤ factor · r).
+    #[arg(long)]
+    pub far_step: Option<f32>,
+    /// Override the near-horizon step cap (|Δr| ≤ factor · (r − r₊)).
+    #[arg(long)]
+    pub horizon_step: Option<f32>,
+    /// Override the escape radius factor (r_escape = max(factor · r_camera, min)).
+    #[arg(long)]
+    pub escape_factor: Option<f32>,
+    /// Override the minimum escape radius.
+    #[arg(long)]
+    pub escape_min: Option<f32>,
+    /// Override the capture margin: captured once r < r₊ + eps while moving inward.
+    #[arg(long)]
+    pub horizon_eps: Option<f32>,
+    /// Override the trace dispatch tile side in pixels (one submission per tile).
+    #[arg(long)]
+    pub tile: Option<u32>,
+    /// Override the photon-orbit capture fraction κ (capture margin = max(eps, κ (r_ph,pro − r₊))).
+    #[arg(long)]
+    pub capture_fraction: Option<f32>,
+    /// Override the momentum blow-up factor (captured once |p| > factor · |p₀|).
+    #[arg(long)]
+    pub blowup: Option<f32>,
+    /// Also run the PRD §9 test 15 comparison (10 cameras, 64² rays each, vs the CPU f64 reference) with these
+    /// parameters.
+    #[arg(long)]
+    pub parity: bool,
+    /// Write the steps heat map (FR-R6) of each scene's last timed sample to `<dir>/<scene>-<scale>-steps.png`.
+    #[arg(long)]
+    pub steps_map: Option<PathBuf>,
     /// Do not read or write the baked-sky cache.
     #[arg(long)]
     pub no_cache: bool,
+}
+
+impl BenchArgs {
+    /// GPU tracing parameters: the defaults with the overrides applied.
+    pub fn trace_params(&self) -> TraceParams<f32> {
+        let mut p = TraceParams::<f32>::gpu_default();
+        if let Some(r) = self.rtol {
+            p.rtol = r;
+            p.atol = r * 1e-2;
+        }
+        if let Some(m) = self.max_steps {
+            p.max_steps = m;
+        }
+        if let Some(f) = self.far_step {
+            p.far_step_factor = f;
+        }
+        if let Some(f) = self.horizon_step {
+            p.horizon_step_factor = f;
+        }
+        if let Some(f) = self.escape_factor {
+            p.escape_factor = f;
+        }
+        if let Some(m) = self.escape_min {
+            p.escape_min_radius = m;
+        }
+        if let Some(e) = self.horizon_eps {
+            p.horizon_epsilon = e;
+        }
+        if let Some(k) = self.capture_fraction {
+            p.capture_photon_fraction = k;
+        }
+        if let Some(b) = self.blowup {
+            p.momentum_blowup = b;
+        }
+        p
+    }
 }
 
 /// Mean and 95th percentile of a set of timings (ms).
@@ -65,19 +132,25 @@ pub fn summarize(ms: &mut [f64]) -> (f64, f64) {
 pub fn bench(args: &BenchArgs) -> Result<()> {
     let ctx = GpuContext::new_headless()?.context("no GPU adapter available")?;
     println!("GPU: {}", ctx.describe());
-    let renderer = GpuRenderer::new(&ctx);
-    let mut params = TraceParams::<f32>::gpu_default();
-    if let Some(r) = args.rtol {
-        params.rtol = r;
-        params.atol = r * 1e-2;
+    let mut renderer = GpuRenderer::new(&ctx);
+    if let Some(t) = args.tile {
+        renderer.tracer.tile = t;
     }
-    if let Some(m) = args.max_steps {
-        params.max_steps = m;
-    }
+    let params = args.trace_params();
     println!(
-        "output {}×{}, rtol {:.0e}, max steps {}",
-        args.width, args.height, params.rtol, params.max_steps
+        "output {}×{}, rtol {:.0e}, max steps {}, far step {}, horizon step {}, escape max({} r_cam, {})",
+        args.width,
+        args.height,
+        params.rtol,
+        params.max_steps,
+        params.far_step_factor,
+        params.horizon_step_factor,
+        params.escape_factor,
+        params.escape_min_radius
     );
+    if args.parity {
+        parity(&ctx, &renderer, &params)?;
+    }
     let scenes: Vec<(String, Scene)> = if args.scene.is_empty() {
         vec![("default".into(), Scene::default())]
     } else {
@@ -130,6 +203,11 @@ pub fn bench(args: &BenchArgs) -> Result<()> {
             let (trace_mean, _) = summarize(&mut trace_ms);
             println!("    trace only: {trace_mean:6.2} ms");
             let stats = renderer.read_stats(&ctx, &target)?;
+            if let Some(dir) = &args.steps_map {
+                let bytes = renderer.debug_view(&ctx, &target, gravography_render::gpu::DebugView::Steps)?;
+                let path = dir.join(format!("{name}-{scale:.2}-steps.png"));
+                gravography_render::output::write_rgb8_png(&path, w, h, bytes)?;
+            }
             let (mean, p95) = summarize(&mut ms);
             println!(
                 "  scale {scale:.2} ({w}×{h}): {mean:6.2} ms/sample (p95 {p95:6.2}) → {:5.1} fps; \
@@ -154,6 +232,73 @@ pub fn bench(args: &BenchArgs) -> Result<()> {
             t.elapsed().as_secs_f64() * 1e3
         );
     }
+    Ok(())
+}
+
+/// PRD §9 test 15 with `params` (as `crates/gravography-render/tests/gpu_tracer.rs`, 64² rays per camera, 90°
+/// field of view): status agreement, escape-direction errors and mean GPU steps.
+fn parity(ctx: &GpuContext, renderer: &GpuRenderer, params: &TraceParams<f32>) -> Result<()> {
+    use gravography_render::cpu::status_from_index;
+    use gravography_render::parity::{Comparison, RayOutcome, compare, frame_for, parity_cameras};
+    use gravography_render::{CpuRenderer, CpuSettings, Sky};
+    use gravography_sky::cubemap::CubeLevel;
+    use gravography_sky::{BlackbodyLut, CubeMap};
+
+    let side = 64;
+    let sky = Sky::new(
+        CubeMap::with_mips(CubeLevel::zeros(1)),
+        BlackbodyLut::human_vision(),
+    );
+    let mut all = Comparison::default();
+    let mut steps = 0_u64;
+    let t = Instant::now();
+    for cam in parity_cameras() {
+        let frame = frame_for(&cam, side, 90.0);
+        let gpu = renderer.tracer.trace_to_cpu(ctx, &frame, params)?;
+        let cpu = CpuRenderer::new(&frame, &sky, CpuSettings::default())?;
+        let n = (side * side) as usize;
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+        let chunk = n.div_ceil(threads);
+        let cpu_out: Vec<RayOutcome> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..n)
+                .step_by(chunk)
+                .map(|start| {
+                    let cpu = &cpu;
+                    s.spawn(move || {
+                        (start..(start + chunk).min(n))
+                            .map(|k| {
+                                let k = k as u32;
+                                let h = cpu.cast_pixel(f64::from(k % side) + 0.5, f64::from(k / side) + 0.5);
+                                RayOutcome {
+                                    status: h.status,
+                                    dir: h.dir,
+                                    steps: h.steps,
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().expect("CPU reference thread panicked"))
+                .collect()
+        });
+        let gpu_out: Vec<RayOutcome> = gpu
+            .iter()
+            .map(|g| RayOutcome::from_gpu(g.status, g.dir_g, g.steps))
+            .collect();
+        debug_assert!(gpu.iter().all(|g| status_from_index(g.status).is_some()));
+        steps += gpu.iter().map(|g| u64::from(g.steps + g.rejected)).sum::<u64>();
+        all.merge(&compare(&gpu_out, &cpu_out));
+    }
+    println!(
+        "parity (test 15, 64²×10): {}; within 1e-3 rad {:.4}; GPU mean steps {:.0} ({:.1} s)",
+        all.summary(),
+        all.fraction_within(1e-3),
+        steps as f64 / all.rays as f64,
+        t.elapsed().as_secs_f64()
+    );
     Ok(())
 }
 

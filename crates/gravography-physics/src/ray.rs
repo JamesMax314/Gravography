@@ -9,7 +9,8 @@
 //! 1. non-finite state → `Error`;
 //! 2. `r < r_singular` → `Singular`;
 //! 3. `r > r_escape` and `r` increasing → `Escaped`, `r_escape = max(escape_factor · r_camera, escape_min_radius)`;
-//! 4. `r < r_+ + horizon_epsilon` and `r` decreasing → `Captured` (approach to the past horizon);
+//! 4. `r < r_+ + capture_margin` and `r` decreasing → `Captured` (approach to the past horizon;
+//!    [`TraceParams::capture_margin`]);
 //! 5. `max |p_i| > momentum_blowup · max |p(0)|` → `Captured` (momentum blow-up near the past horizon);
 //! 6. step budget exhausted → `MaxSteps`.
 
@@ -95,8 +96,11 @@ pub struct TraceParams<T> {
     pub escape_factor: T,
     /// See `escape_factor`.
     pub escape_min_radius: T,
-    /// Capture when `r < r_+ + horizon_epsilon` and moving inward.
+    /// Capture when `r < r_+ + horizon_epsilon` and moving inward (see [`TraceParams::capture_margin`]).
     pub horizon_epsilon: T,
+    /// Widens the capture margin to `capture_photon_fraction · (r_ph,pro − r_+)` when that is larger
+    /// ([`TraceParams::capture_margin`]). Must be `< 1`; 0 disables it (CPU reference).
+    pub capture_photon_fraction: T,
     /// Capture when `max |p_i|` exceeds this multiple of the initial `max |p_μ|`.
     pub momentum_blowup: T,
     /// `Singular` when `r` drops below this.
@@ -119,6 +123,7 @@ impl<T: Real> TraceParams<T> {
             escape_factor: T::lit(16.0),
             escape_min_radius: T::lit(400.0),
             horizon_epsilon: T::lit(1e-3),
+            capture_photon_fraction: T::zero(),
             momentum_blowup: T::lit(1e8),
             r_singular: T::lit(1e-3),
         }
@@ -126,10 +131,21 @@ impl<T: Real> TraceParams<T> {
 }
 
 impl<T: Real> TraceParams<T> {
-    /// GPU defaults (f32; `docs/PRD.md` §5.5: rtol ~1e-5–1e-4, step budget ≲ 1000 for watchdog limits). Tuned in
-    /// WP-08 against the CPU reference (`docs/physics.md` § "GPU tracer tolerances"). The escape radius and capture
-    /// criteria are those of [`TraceParams::cpu_reference`] except the momentum blow-up factor
-    /// ([`GPU_MOMENTUM_BLOWUP`]), so classification matches.
+    /// Capture margin above `r_+`: `max(horizon_epsilon, capture_photon_fraction · (r_ph,pro − r_+))`. Sound for
+    /// `capture_photon_fraction < 1`: no photon has a radial turning point (periapsis) between `r_+` and the
+    /// prograde equatorial photon orbit `r_ph,pro`, so an inward-moving ray below `r_ph,pro` cannot turn back
+    /// (`docs/physics.md` § "Termination and classification", tested by
+    /// `photon_periapsis_never_below_prograde_photon_orbit`).
+    pub fn capture_margin(&self, kerr: &Kerr<T>) -> T {
+        let r_plus = kerr.outer_horizon();
+        let wide = self.capture_photon_fraction * (kerr.photon_orbit(true) - r_plus);
+        self.horizon_epsilon.max(wide)
+    }
+
+    /// GPU defaults (f32; `docs/PRD.md` §5.5). Tuned in WP-08 for accuracy and in WP-12 for speed against the CPU
+    /// reference with `gravography bench --parity` (`docs/physics.md` § "GPU tracer tolerances"): step caps and
+    /// tolerance together set the step count, the escape radius is smaller, and captured rays stop earlier
+    /// (spin-scaled capture margin, lower momentum blow-up factor). PRD test 15 still gives 100 % status agreement.
     pub fn gpu_default() -> Self {
         Self {
             rtol: T::lit(GPU_RTOL),
@@ -137,22 +153,40 @@ impl<T: Real> TraceParams<T> {
             h_min: T::lit(GPU_H_MIN),
             max_steps: GPU_MAX_STEPS,
             momentum_blowup: T::lit(GPU_MOMENTUM_BLOWUP),
+            far_step_factor: T::lit(GPU_FAR_STEP_FACTOR),
+            escape_factor: T::lit(GPU_ESCAPE_FACTOR),
+            escape_min_radius: T::lit(GPU_ESCAPE_MIN_RADIUS),
+            capture_photon_fraction: T::lit(GPU_CAPTURE_PHOTON_FRACTION),
             ..Self::cpu_reference()
         }
     }
 }
 
-/// Default GPU DOPRI5 relative tolerance.
-pub const GPU_RTOL: f64 = 1e-5;
-/// Default GPU DOPRI5 absolute tolerance.
-pub const GPU_ATOL: f64 = 1e-7;
+/// Default GPU DOPRI5 relative tolerance. With the far-field cap relaxed ([`GPU_FAR_STEP_FACTOR`]) the error
+/// controller sets the step: 2e-6 keeps the PRD test 15 escape directions at p99 ≈ 1.7e-4 rad (WP-12 sweep).
+pub const GPU_RTOL: f64 = 2e-6;
+/// Default GPU DOPRI5 absolute tolerance (`rtol / 100`).
+pub const GPU_ATOL: f64 = 2e-8;
+/// Default GPU far-field step cap (coordinate displacement ≤ factor · r). The CPU's 0.1 made the cap, not the
+/// error control, set most steps; 0.5 leaves step control to DOPRI5 (WP-12).
+pub const GPU_FAR_STEP_FACTOR: f64 = 0.5;
+/// Default GPU escape factor: `r_escape = max(4 r_camera, 100)`. The remaining deflection beyond `r_escape` is
+/// `≈ 2M/r_escape` for radial rays at worst; measured p99 direction error is unchanged at the parity cameras
+/// (WP-12 sweep).
+pub const GPU_ESCAPE_FACTOR: f64 = 4.0;
+/// Default GPU minimum escape radius (see [`GPU_ESCAPE_FACTOR`]).
+pub const GPU_ESCAPE_MIN_RADIUS: f64 = 100.0;
+/// Default GPU photon-orbit capture fraction κ ([`TraceParams::capture_margin`]): an inward ray is captured below
+/// `r_+ + ½ (r_ph,pro − r_+)`, halfway to the lowest possible photon periapsis.
+pub const GPU_CAPTURE_PHOTON_FRACTION: f64 = 0.5;
 /// Default GPU smallest step (an f32 step much below `ε · |x|` no longer moves the ray).
 pub const GPU_H_MIN: f64 = 1e-6;
 /// Default GPU momentum blow-up factor. Rays approaching the past (white-hole) horizon from inside reach
 /// `|p| = 10⁸ |p₀|` only at `r − r_+ ≈ 10⁻⁸`, below the f32 resolution of `r` (ulp ≈ 2.4e-7 at r = 2). An f32 ray
 /// then steps across `r_+` and is misclassified. Escaping rays of the parity camera set peak at `|p|/|p₀| ≤ 12`, so
-/// 10⁴ keeps a ≈ 800× margin (`docs/physics.md` § "GPU tracer tolerances").
-pub const GPU_MOMENTUM_BLOWUP: f64 = 1e4;
+/// 10³ keeps an ≈ 80× margin (WP-08 used 10⁴; WP-12 lowered it because captured rays spend most of their steps
+/// approaching the blow-up; `docs/physics.md` § "GPU tracer tolerances").
+pub const GPU_MOMENTUM_BLOWUP: f64 = 1e3;
 /// Default GPU step budget (accepted + rejected).
 pub const GPU_MAX_STEPS: u32 = 2000;
 
@@ -242,6 +276,7 @@ pub fn trace_ray_observed<T: Real>(
         pack(&dx, &dp)
     };
     let r_plus = kerr.outer_horizon();
+    let capture_margin = params.capture_margin(kerr);
     let r_escape = (params.escape_factor * kerr.r(x0)).max(params.escape_min_radius);
     let p_limit = params.momentum_blowup * max_abs(p0);
     let ctl = StepController::<T>::dopri5();
@@ -313,7 +348,7 @@ pub fn trace_ray_observed<T: Real>(
             Some(RayStatus::Singular)
         } else if r > r_escape && r > r_prev {
             Some(RayStatus::Escaped)
-        } else if (r < r_plus + params.horizon_epsilon && r < r_prev) || max_abs(&p) > p_limit {
+        } else if (r < r_plus + capture_margin && r < r_prev) || max_abs(&p) > p_limit {
             Some(RayStatus::Captured)
         } else {
             None
@@ -330,6 +365,80 @@ mod tests {
     use super::*;
     use crate::linalg::eta;
     use approx::assert_relative_eq;
+
+    #[test]
+    fn photon_periapsis_never_below_prograde_photon_orbit() {
+        // Justifies TraceParams::capture_margin: for photons (E = 1) the radial potential
+        // R(r) = (r² + a² − a ξ)² − Δ (η + (ξ − a)²) (Bardeen 1973) has no periapsis — an upward zero crossing,
+        // where an inward-moving photon turns back — in (r_+, r_ph,pro). Grid over ξ ∈ [−12, 12] (plus a fine band
+        // around the superradiant value ξ = 2 r_+/a, where R(r_+) = 0) and η up to 60, including the vortical
+        // range η ≥ −(a − |ξ|)² for |ξ| < a where Θ(θ) ≥ 0 is still possible. r is sampled on 300 points; a
+        // periapsis would need R < 0 then R ≥ 0 between two samples. (A numpy root search over 1.3·10⁶ constants
+        // found the lowest periapsis 0.03 % above r_ph,pro for a = 0.999; docs/physics.md.)
+        for a in [0.0, 0.5, 0.9, 0.99, 0.998, 0.999] {
+            let kerr = Kerr::new(a).unwrap();
+            let (rp, rph) = (kerr.outer_horizon(), kerr.photon_orbit(true));
+            let mut found_above = 0;
+            let mut xis: Vec<f64> = (0..=400).map(|i| -12.0 + 0.06 * f64::from(i)).collect();
+            if a > 0.0 {
+                xis.extend((0..=100).map(|i| 2.0 * rp / a - 0.05 + 1e-3 * f64::from(i)));
+            }
+            for &xi in &xis {
+                let eta_min = if xi.abs() < a {
+                    -(a - xi.abs()).powi(2)
+                } else {
+                    0.0
+                };
+                for j in 0..=100 {
+                    let eta = eta_min + (60.0 - eta_min) * (f64::from(j) / 100.0).powi(3);
+                    let big_r = |r: f64| {
+                        let d = r * r - 2.0 * r + a * a;
+                        (r * r + a * a - a * xi).powi(2) - d * (eta + (xi - a).powi(2))
+                    };
+                    let mut prev = big_r(rp + 1e-9);
+                    for i in 1..=300 {
+                        let r = rp + (rph - rp) * f64::from(i) / 300.0;
+                        let cur = big_r(r);
+                        assert!(
+                            !(prev < 0.0 && cur >= 0.0),
+                            "a = {a}: periapsis near r = {r} < r_ph,pro = {rph} for ξ = {xi}, η = {eta}"
+                        );
+                        prev = cur;
+                    }
+                    // Control: the same detector finds periapses just outside the photon region.
+                    let mut prev = big_r(rph);
+                    for i in 1..=300 {
+                        let cur = big_r(rph + 3.0 * f64::from(i) / 300.0);
+                        if prev < 0.0 && cur >= 0.0 {
+                            found_above += 1;
+                            break;
+                        }
+                        prev = cur;
+                    }
+                }
+            }
+            assert!(
+                found_above > 100,
+                "a = {a}: control found only {found_above} periapses above r_ph,pro"
+            );
+        }
+    }
+
+    #[test]
+    fn capture_margin_scales_with_the_photon_orbit() {
+        let mut p = TraceParams::<f64>::cpu_reference();
+        let k = Kerr::new(0.999).unwrap();
+        assert_eq!(p.capture_margin(&k), 1e-3, "CPU reference: fixed ε");
+        p.capture_photon_fraction = 0.5;
+        let expect = 0.5 * (k.photon_orbit(true) - k.outer_horizon());
+        assert_relative_eq!(p.capture_margin(&k), expect, max_relative = 1e-15);
+        assert!(p.capture_margin(&k) < k.photon_orbit(true) - k.outer_horizon());
+        assert_relative_eq!(
+            p.capture_margin(&Kerr::new(0.0).unwrap()),
+            0.5,
+            max_relative = 1e-15
+        );
+    }
 
     fn identity_tetrad() -> Tetrad<f64> {
         Tetrad {
