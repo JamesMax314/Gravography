@@ -124,9 +124,15 @@ impl<T: Real> Kerr<T> {
         let chi = self.chi();
         let one = T::one();
         let three = T::lit(3.0);
-        let z1 = one + (one - chi * chi).cbrt() * ((one + chi).cbrt() + (one - chi).cbrt());
+        // With p = (1 + χ)^{1/3}, m = (1 − χ)^{1/3}: (1 − χ²)^{1/3} = p m, so Z₁ = 1 + p m (p + m), and
+        // 3 − Z₁ = p³ + m³ − p²m − pm² = (p + m)(p − m)² with p − m = 2χ / (p² + pm + m²). This avoids the
+        // cancellation of `3 − Z₁` as χ → 0 (docs/physics.md § "Characteristic radii").
+        let (p, m) = ((one + chi).cbrt(), (one - chi).cbrt());
+        let z1 = one + p * m * (p + m);
+        let p_minus_m = T::lit(2.0) * chi / (p * p + p * m + m * m);
+        let three_minus_z1 = (p + m) * p_minus_m * p_minus_m;
         let z2 = (three * chi * chi + z1 * z1).sqrt();
-        let root = ((three - z1) * (three + z1 + T::lit(2.0) * z2)).sqrt();
+        let root = (three_minus_z1 * (three + z1 + T::lit(2.0) * z2)).sqrt();
         let sign = if prograde { -one } else { one };
         self.mass * (three + z2 + sign * root)
     }
@@ -215,6 +221,24 @@ mod tests {
             3.0 * k1.outer_horizon(),
             max_relative = RADIUS_TOL
         );
+    }
+
+    #[test]
+    fn isco_is_accurate_for_tiny_spin() {
+        // Regression (found by `isco_satisfies_marginal_stability` with a random seed during WP-05): the BPT
+        // formula computed `3 − Z₁` by subtraction, which cancels as χ → 0 and cost ~5 digits of r_isco at
+        // a ≈ 1e-5 (residual 1.05e-10 > 1e-10). Same tolerance as the property test.
+        for a in [1.343_873_799_660_289_1e-5_f64, 1e-7, 1e-3] {
+            let k = Kerr::new(a).unwrap();
+            for (pro, s) in [(true, 1.0), (false, -1.0)] {
+                let r = k.isco(pro);
+                let residual = r * r - 6.0 * r + s * 8.0 * a * r.sqrt() - 3.0 * a * a;
+                assert!(
+                    residual.abs() < 1e-10,
+                    "a = {a}, pro = {pro}: residual {residual}"
+                );
+            }
+        }
     }
 
     proptest! {

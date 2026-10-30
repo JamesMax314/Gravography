@@ -1,0 +1,4 @@
+# Deterministic property tests (CLAUDE.md §4: fixed seeds). proptest reads this seed; an existing environment
+# variable takes precedence, so `PROPTEST_RNG_SEED=<n> cargo test` explores other seeds.
+[env]
+PROPTEST_RNG_SEED = "20261030"

@@ -1,3 +1,6 @@
 /target/
 **/*.rs.bk
 .DS_Store
+
+# proptest failure persistence (seeds are fixed in .cargo/config.toml, so these are redundant)
+proptest-regressions/

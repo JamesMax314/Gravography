@@ -403,6 +403,75 @@ app should reset to a safe preset.
 The orbit errors are DOPRI5 truncation error. A probe (one orbit, r = 10) showed them falling about 15× per decade
 of `rtol`, e.g. the precession `cos Δφ` error went 4e-7, 3e-8, 2e-9, 1e-10, 9e-12 for `rtol = 1e-8 … 1e-12`.
 
-## Sections (to be written)
+## Colour pipeline and sky
 
-- Colour pipeline and sky representation — WP-05
+Code: `crates/gravography-sky/src/`.
+
+### Spectra and colour
+
+- **Planck** (`planck.rs`): `B_λ(T) = 2hc²/λ⁵ / (e^{c₂/(λT)} − 1)` and `B_ν(T) = 2hν³/c² / (e^{hν/kT} − 1)`, SI 2019 exact
+  `h, c, k`. `exp_m1` keeps the Rayleigh–Jeans end accurate, and an overflowing exponent returns 0.
+- **Blackbody under a frequency shift.** `I_ν/ν³` is invariant, so `I_ν,obs(ν) = g³ I_ν,emit(ν/g)`. For a
+  blackbody, `g³ B_ν(ν/g, T) = B_ν(ν, gT)` exactly (in wavelength, `g⁵ B_λ(gλ, T) = B_λ(λ, gT)`), so a source of
+  temperature `T` and filling factor `w` is observed as `w · B(gT)`. Shading therefore needs one LUT lookup at `gT`
+  (`docs/PRD.md` §5.7, §6.3). Tested pointwise, and through the band integral.
+- **CIE 1931 2°** (`cmf.rs`): bundled 1 nm table (`THIRD_PARTY.md`). **Band response** (`band.rs`):
+  `cᵢ(T) = Σ_λ B_λ(λ, T) rᵢ(λ) Δλ`, a rectangle sum at the table spacing (CIE-recommended); for human vision
+  `c = XYZ` in W m⁻² sr⁻¹ (no `K_m` factor; exposure absorbs absolute scale).
+- **XYZ → linear sRGB** (`colour.rs`): derived from the sRGB primaries and D65 `(0.3127, 0.3290)` by the standard
+  construction (RGB→XYZ columns = primaries scaled so `(1,1,1)` ↦ white), then inverted. It agrees with the IEC
+  61966-2-1 4-decimal matrix to < 5e-4. The sRGB transfer function is IEC 61966-2-1.
+
+### Blackbody LUT
+
+`BlackbodyLut`: 4096 entries uniform in `ln T` over `[100 K, 10⁷ K]`, each `[ln S, x, y, 0]` (f32) with
+`S = c₀ + c₁ + c₂` and `(x, y)` the chromaticity. `ln S` spans ≈ −360 … +40, which f32 holds easily, whereas `S`
+itself would underflow at 100 K. Interpolation is linear in `ln T`. The error is dominated by the curvature of
+`ln S ≈ −c₂/(λ_eff T)` in `ln T`, i.e. `h²/8 · c₂/(λT)` with `h = ln(10⁵)/4095`. Measured worst case: `Y` < 5e-4
+relative and `xy` < 1e-5. Out-of-range temperatures are clamped and flagged (`LutSample::clamped`). The GPU must
+sample entry centres: texture coordinate `(u (n − 1) + 0.5)/n` with `u = ln(T/T_min)/ln(T_max/T_min)`.
+
+Validation (PRD §9 tests 13, 14): Planckian-locus chromaticities vs Kim et al.'s published cubic spline, 1700–25000 K,
+worst deviation < 1.5e-3 (tolerance 2e-3). Illuminant A (Planckian, 2848 K with `c₂ = 1.435e-2`) gives
+(0.447574, 0.407439) vs the published (0.44757, 0.40745). Wien `λ_max T = b` to 1e-7. Stefan–Boltzmann
+`π∫B_ν dν = σT⁴` to 1e-9 (T = 100 K … 10⁷ K). RJ/Wien limits.
+
+### Procedural star field
+
+`catalogue.rs`, deterministic from a `u64` seed via SplitMix64 (`rng.rs`). It is implemented in-crate so that output
+is bit-stable across dependency updates (NF-3); the reference vector is tested.
+
+- **Temperature:** a spectral-class mixture O 0.5 %, B 3.5 %, A 6 %, F 8 %, G 12 %, K 25 %, M 45 %, log-uniform
+  within each class's range (2400–50000 K).
+- **Brightness:** the flux in band channel 1 (`Y`) follows `N(> F) ∝ F^{−α}` (α = 3/2, the Euclidean count slope),
+  truncated to `[F_min, 10⁴ F_min]` (10 magnitudes). It is sampled by inversion: `F = F_min v^{−1/α}` with
+  `v ~ U[R^{−α}, 1]`.
+- **Solid angle:** a star is a blackbody disc, `F = Ω_* Y_BB(T)`, so `Ω_* = F / Y_BB(T)` (LUT).
+- **Positions:** a fraction `f_gal = 0.6` follows an exponential latitude profile `|b| ~ Exp(h = 0.15 rad)` about a
+  galactic pole (default tilted 60° from the spin axis); the rest are isotropic.
+
+**Diffuse band** (`diffuse.rs`): `w(d) = A e^{−|b|/h} (1 − k + k·fbm(f d))`, with 5-octave value noise hashed with
+`mix64`, its own temperature (4500 K), and `A = 5e-3` chosen by eye (`examples/sky_preview.rs`).
+
+### Sky cube map
+
+`cubemap.rs`, `bake.rs`. The face layout and `(u, v)` convention are the standard GL/Vulkan/Metal/WebGPU cube
+convention (table in the module docs), so the GPU samples with the escape direction directly. KS axes are used
+as-is (`+z` = spin axis).
+
+- **Texel solid angle** (exact): with face coordinates `a, b ∈ [−1, 1]`, `Ω([a₀,a₁]×[b₀,b₁]) = A(a₀,b₀) − A(a₀,b₁) −
+  A(a₁,b₀) + A(a₁,b₁)`, `A(a, b) = atan2(ab, sqrt(a² + b² + 1))`. Sums to 4π (tested).
+- **Texels** store `(w, w·T)` (f32). A star is splatted with a bilinear tent over 2×2 texels with weights
+  `kᵢ` (Σ kᵢ = 1): `wᵢ += kᵢ Ω_*/Ω_texel,ᵢ`, `(wT)ᵢ += kᵢ Ω_* T/Ω_texel,ᵢ`. **Flux conservation:**
+  `Σ w Ω = Σ Ω_*` exactly; tested to 1e-5 (f32) at every mip level, also at production size (2048², 2·10⁵ stars).
+  Taps are clamped at face edges (no cross-face splat): < 1 texel position error there, no flux error.
+- **Mips:** parent = solid-angle-weighted mean of its 4 children, so `Σ w Ω` is conserved per level.
+- **Temperature mixing (approximation, PRD §6.3).** A texel (or mip texel) containing several sources stores
+  `T_eff = Σ wᵢTᵢ / Σ wᵢ`, and shading uses `w · c(g T_eff)` instead of `Σ wᵢ c(g Tᵢ)`. `Σ w Ω` (the total solid angle
+  of the sources) is exact; the colour and band flux of a mixed texel are those of
+  a single blackbody at the mean temperature. The error is second order in the temperature spread within the
+  footprint. It matters only where differently coloured stars share a footprint, i.e. at coarse mips, and it
+  does not change under lensing, because surface brightness is conserved.
+- **Cache** (`cache.rs`): binary dump keyed by FNV-1a of the bake version and `Debug` text of `SkyParams`; a
+  mismatching or corrupt file is a miss. The directory is chosen by the app.
+
