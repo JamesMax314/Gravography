@@ -42,8 +42,12 @@ pub const TRACE_PIXELS: ShaderModule = wgsl_module!("trace_pixels.wgsl");
 pub const SKY: ShaderModule = wgsl_module!("sky.wgsl");
 /// Shading pass: footprint from neighbours, sky sample, accumulation.
 pub const SHADE: ShaderModule = wgsl_module!("shade.wgsl");
-/// Exposure, tone mapping and sRGB encoding (port of `tonemap.rs`).
+/// Tone-mapping operators and sRGB encoding (port of `tonemap.rs`), shared by the tone-map and present passes.
+pub const TONEMAP_OPS: ShaderModule = wgsl_module!("tonemap_ops.wgsl");
+/// Tone-map compute pass to packed RGBA8.
 pub const TONEMAP: ShaderModule = wgsl_module!("tonemap.wgsl");
+/// Present pass: tone-mapped accumulation buffer onto a render target.
+pub const PRESENT: ShaderModule = wgsl_module!("present.wgsl");
 /// FR-R6 debug views.
 pub const DEBUG: ShaderModule = wgsl_module!("debug.wgsl");
 /// Entry points for the parity harness.
@@ -95,18 +99,22 @@ pub const SHADE_MODULES: [ShaderModule; 10] = [
 ];
 
 /// Modules of the tone-map shader.
-pub const TONEMAP_MODULES: [ShaderModule; 2] = [COMMON, TONEMAP];
+pub const TONEMAP_MODULES: [ShaderModule; 3] = [COMMON, TONEMAP_OPS, TONEMAP];
+
+/// Modules of the present shader.
+pub const PRESENT_MODULES: [ShaderModule; 3] = [COMMON, TONEMAP_OPS, PRESENT];
 
 /// Modules of the debug-view shader.
 pub const DEBUG_MODULES: [ShaderModule; 3] = [COMMON, GBUFFER, DEBUG];
 
 /// Every assembled shader (name, modules), for validation tests.
-pub const ALL_SHADERS: [(&str, &[ShaderModule]); 5] = [
+pub const ALL_SHADERS: [(&str, &[ShaderModule]); 6] = [
     ("test_rays", &TEST_RAY_MODULES),
     ("trace_pixels", &TRACE_PIXEL_MODULES),
     ("shade", &SHADE_MODULES),
     ("tonemap", &TONEMAP_MODULES),
     ("debug", &DEBUG_MODULES),
+    ("present", &PRESENT_MODULES),
 ];
 
 /// Source of the test-ray shader (entry points `trace_rk4_main`, `trace_dopri5_main`, `eval_rhs_main`).
@@ -127,6 +135,11 @@ pub fn shade_shader() -> String {
 /// Source of the tone-map shader (entry point `tonemap_main`).
 pub fn tonemap_shader() -> String {
     assemble(&TONEMAP_MODULES)
+}
+
+/// Source of the present shader (entry points `present_vs`, `present_fs`).
+pub fn present_shader() -> String {
+    assemble(&PRESENT_MODULES)
 }
 
 /// Source of the debug-view shader (entry point `debug_main`).

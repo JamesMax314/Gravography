@@ -6,12 +6,14 @@
 //! same names and structure (`CLAUDE.md` §5).
 
 pub mod context;
+pub mod present;
 pub mod renderer;
 pub mod shader;
 pub mod test_rays;
 pub mod tracer;
 
 pub use context::GpuContext;
+pub use present::Presenter;
 pub use renderer::{DebugView, GpuFrame, GpuRenderer, GpuSky};
 pub use test_rays::{GpuPhase, GpuRay, GpuRayResult, GpuTraceParams, TestRayPipeline};
 pub use tracer::{GBuffer, GBufferTexel, GpuCamera, GpuTracer};

@@ -56,7 +56,7 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
 | WP-07 | GPU foundation | done | `wp-07` |
 | WP-08 | GPU ray tracer | done | `wp-08` |
 | WP-09 | GPU shading & headless GPU render | done | `wp-09` |
-| WP-10 | Viewer shell | not started | |
+| WP-10 | Viewer shell | in progress (branch `wp-10-viewer-shell`, INCOMPLETE) | |
 | WP-11 | Interactive flight | not started | |
 | WP-12 | Performance | not started | |
 | WP-13 | v1 polish & release | not started | |
@@ -94,6 +94,55 @@ Template for each entry (copy above the previous entry):
 **Notes for the next agent**
 -
 -->
+
+## WP-10 — Viewer shell — 2026-10-30 — INCOMPLETE
+
+**Where it stopped:** the session hit its usage limit. Work is committed on branch `wp-10-viewer-shell` and not
+merged to `main`.
+
+**Done (compiles; render-crate unit tests pass: 35)**
+- **Render crate:**
+  - `GpuFrame::new` makes the per-frame buffers persistent, and `GpuRenderer::render_sample` renders one
+    progressive sample into them (`render` now loops over it).
+  - `GpuContext::{for_surface, from_adapter}` and a new `adapter` field.
+  - Present pass (`gpu/present.rs`, `shaders/present.wgsl`): a full-screen triangle that tone-maps the
+    accumulation buffer onto a render target, stretched over a destination rectangle, with sRGB encoding when
+    the target is not `*Srgb`. Validated with naga, and its layout is checked.
+  - Tone-map functions moved to the shared module `tonemap_ops.wgsl` (`tone_map_accum`); `tonemap.wgsl` uses
+    it.
+- **App crate:** dependencies added: `winit 0.30.13`, `egui`/`egui-wgpu`/`egui-winit 0.37` (they share wgpu
+  30.0.1), and `wgpu`, `pollster`. New files, **not yet wired into `main.rs`** (no `mod viewer;` yet):
+  - `src/viewer/state.rs`: `ViewSettings`, `internal_size`, `Accumulation`, with tests;
+  - `src/viewer/screenshot.rs`: `screenshot_paths`, with a test;
+  - `src/viewer/ui.rs`: the egui settings panel. egui 0.37 API:
+    `ctx.run_ui(input, |ui| egui::Panel::left("id").show(ui, |ui| …))`.
+
+**Remaining**
+1. **`src/viewer/mod.rs`:** winit `ApplicationHandler`.
+   - `resumed`: create the window, `instance.create_surface(Arc<Window>)`, `GpuContext::for_surface`, and
+     configure the surface. Prefer the format from `egui_wgpu::preferred_framebuffer_format`.
+   - Build `GpuRenderer`, `Presenter`, `GpuSky` and the egui state/renderer.
+   - Per redraw: egui input → panel → apply settings (resetting the `Accumulation` on size or sample changes)
+     → `render_sample` → meter auto exposure on the first sample and at convergence (`read_hdr` +
+     `Exposure::scale` with the stored log-average) → acquire the surface texture (`CurrentSurfaceTexture`
+     enum in wgpu 30) → a render pass (`.forget_lifetime()` for egui) running `Presenter::draw` and then
+     `egui_renderer.render` → present.
+   - Request a redraw until converged.
+   - `Resized` reconfigures the surface and recreates the `GpuFrame`.
+   - The P key and the panel button take a screenshot: render a converged full-window-resolution frame,
+     write the PNG via `GpuRenderer::tonemap` + `write_rgb8_png` and the EXR via `write_image`, into
+     `--screenshot-dir` (default `screenshots/`; add it to `.gitignore`).
+2. **`main.rs`:** no subcommand → viewer, with `--scene` (default `Scene::default()`), `--screenshot-dir` and
+   `--smoke-test`. The smoke test should converge, take a screenshot, request a different window size, wait
+   until the surface size changes, converge again, take a second screenshot and exit 0, with a timeout. This
+   makes the acceptance checks (launch, render, resize, screenshot files) scriptable.
+3. **Checks and docs:** run fmt/clippy/tests and the ignored GPU tests. Launch the viewer and the smoke test on
+   macOS. Update README (viewer usage), `physics.md` (present pass) and this report. Then merge and tag
+   `wp-10`.
+
+**Notes**
+- The wgpu 30 `RenderPassDescriptor` has a `multiview_mask` field; `RenderPassColorAttachment` has
+  `depth_slice`.
 
 ## WP-09 — GPU shading & headless GPU render — 2026-10-30 — COMPLETE
 

@@ -18,6 +18,12 @@ gravography-sky.workspace = true
 gravography-render.workspace = true
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
+egui = "0.37.0"
+egui-wgpu = "0.37.0"
+egui-winit = "0.37.0"
+winit = "0.30.13"
+wgpu = "30.0.1"
+pollster = "1.0.1"
 
 [lints]
 workspace = true
