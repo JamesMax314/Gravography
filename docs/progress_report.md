@@ -16,20 +16,17 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
   - the CPU reference renderer and the GPU renderer (dynamic resolution, async statistics);
   - the `gravography` binary: viewer, `render` and `bench`.
   - The viewer's projections, bookmarks and camera paths are new in WP-13.
-- **Not done, optional or deferred** (needs the user's approval before tagging `v1.0.0`):
-  - **Schwarzschild fast path** (WP-12, optional): not implemented. NF-1 is met without it.
-  - **README screenshots:** WP-13 asks for screenshots in the README, but `CLAUDE.md` §3 forbids committing
-    screenshots. The README currently explains how to make them. **User decision needed.**
-- **Next:** with the user's approval, tag `v1.0.0` on `main`. v2 (`docs/PRD.md` §11) after that.
+- **Released as `v1.0.0`** (2026-10-30), with the user's approval.
+  - Deferred with approval: the optional Schwarzschild fast path (WP-12). NF-1 is met without it.
+  - README screenshots: the user approved committing curated images in `docs/images/` (six JPEGs, about
+    1.9 MB). This is recorded as an exception in `CLAUDE.md` §3.
+- **Next:** v2 (`docs/PRD.md` §11): thin accretion disk, video of camera paths, Kerr LUT acceleration.
 - Toolchain: rustup, Rust **1.99.1** (`rust-toolchain.toml`).
 - The user approved shipping the CC BY-SA 4.0 CIE table (2026-10-30; see `THIRD_PARTY.md`).
 - The user confirmed (2026-10-30) that the viewer opens and resizes. They reported full-screen lag (addressed in
   WP-12) and "inverted" thrust, which is physical aberration. They chose (2026-10-30) **not** to add an
   aberration-free mode.
 - Open questions for the user:
-  - Approve tagging `v1.0.0` with the deferral above?
-  - README screenshots: commit a few curated images (for example under `docs/images/`, an explicit exception to
-    `CLAUDE.md` §3), or keep the README text-only?
   - The example scenes use auto exposure with −2 EV (−4/−5 EV for some), chosen by eye. Adjust to taste.
 
 ---
@@ -51,7 +48,7 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
 | WP-10 | Viewer shell | done | `wp-10` |
 | WP-11 | Interactive flight | done | `wp-11` |
 | WP-12 | Performance | done | `wp-12` |
-| WP-13 | v1 polish & release | done (awaiting `v1.0.0` approval) | `wp-13` |
+| WP-13 | v1 polish & release | done | `wp-13`, `v1.0.0` |
 
 ---
 
@@ -87,7 +84,15 @@ Template for each entry (copy above the previous entry):
 -
 -->
 
-## WP-13 — v1 polish & release — 2026-10-30 — COMPLETE (tag `v1.0.0` pending user approval)
+## v1.0.0 release — 2026-10-30
+
+- **User decisions:** tag `v1.0.0`; add README screenshots. The six images in `docs/images/` were rendered
+  with `render --backend gpu --samples 16` from the example scenes, plus the smoke-test window capture, as
+  JPEG quality 82 (290–370 KB each). The README has a new "Screenshots" section, and `CLAUDE.md` §3 records the
+  exception.
+- **Tag:** `v1.0.0` on the merge commit of branch `v1-release`. No code changes.
+
+## WP-13 — v1 polish & release — 2026-10-30 — COMPLETE
 
 **Summary**
 - **Projection modes (FR-R2):**
