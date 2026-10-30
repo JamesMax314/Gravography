@@ -40,7 +40,8 @@ struct ViewArgs {
     /// Directory for screenshots (key P).
     #[arg(long, default_value = "screenshots")]
     screenshot_dir: PathBuf,
-    /// Scripted check: render, screenshot, resize the window, render, screenshot, exit.
+    /// Scripted check: render, screenshot, resize the window, render, screenshot, fall through the horizon,
+    /// screenshot, exit.
     #[arg(long)]
     smoke_test: bool,
     /// Do not read or write the baked-sky cache.
