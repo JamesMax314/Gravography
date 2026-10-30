@@ -1,0 +1,151 @@
+//! Orthonormal tetrads `{e_(0) = u, e_(1), e_(2), e_(3)}` with `g(e_(a), e_(b)) = η_ab` (`docs/PRD.md` §5.4).
+//!
+//! Spatial legs are labelled forward (1), left (2) and up (3) and must form a right-handed triad
+//! (`docs/PRD.md` §5.4). [`Tetrad::gram_schmidt`] builds one from four seed vectors. WP-04 uses the same routine
+//! for re-orthonormalisation along the observer worldline.
+
+use crate::Real;
+use crate::linalg::{Mat4, Vec4, inner};
+
+/// An orthonormal tetrad: `e_up[a][μ]` is the contravariant component `μ` of leg `a`.
+/// Leg 0 is the observer 4-velocity; legs 1, 2, 3 are forward, left, up.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tetrad<T> {
+    /// `e_up[a][μ]`, leg index first.
+    pub e_up: [Vec4<T>; 4],
+}
+
+impl<T: Real> Tetrad<T> {
+    /// Gram–Schmidt orthonormalisation with respect to `g_lo` of the seeds `(u, forward, left, up)`.
+    ///
+    /// Keeps `e_(0) ∥ u` (normalised to `g(u, u) = −1`), then removes from each spatial seed its components
+    /// along the previous legs: `v ← v − Σ_b η_bb g(v, e_b) e_b`. Returns `None` if `u` is not
+    /// future-or-past timelike or a seed becomes (numerically) degenerate.
+    pub fn gram_schmidt(g_lo: &Mat4<T>, seeds: &[Vec4<T>; 4]) -> Option<Self> {
+        let uu = inner(g_lo, &seeds[0], &seeds[0]);
+        if uu >= T::zero() || !uu.is_finite() {
+            return None;
+        }
+        let mut e = [[T::zero(); 4]; 4];
+        let inv = T::one() / (-uu).sqrt();
+        e[0] = seeds[0].map(|c| c * inv);
+        for a in 1..4 {
+            let mut v = seeds[a];
+            // Twice ("Gram–Schmidt twice is enough") for robustness against cancellation.
+            for _ in 0..2 {
+                for b in 0..a {
+                    let eta_bb = if b == 0 { -T::one() } else { T::one() };
+                    let c = eta_bb * inner(g_lo, &v, &e[b]);
+                    for mu in 0..4 {
+                        v[mu] = v[mu] - c * e[b][mu];
+                    }
+                }
+            }
+            let vv = inner(g_lo, &v, &v);
+            let seed_norm = inner(g_lo, &seeds[a], &seeds[a]).abs();
+            // Degenerate if the remaining spacelike part is tiny compared with the seed.
+            if vv.is_nan() || vv <= T::lit(1e-24) * seed_norm.max(T::one()) {
+                return None;
+            }
+            let inv = T::one() / vv.sqrt();
+            e[a] = v.map(|c| c * inv);
+        }
+        Some(Self { e_up: e })
+    }
+
+    /// Observer 4-velocity `u^μ = e_(0)^μ`.
+    pub fn u(&self) -> Vec4<T> {
+        self.e_up[0]
+    }
+
+    /// Contravariant vector `Σ_a c^a e_(a)` from tetrad components `c = (c⁰, c¹, c², c³)`.
+    pub fn to_coordinate(&self, c: &Vec4<T>) -> Vec4<T> {
+        core::array::from_fn(|mu| (0..4).fold(T::zero(), |s, a| s + c[a] * self.e_up[a][mu]))
+    }
+
+    /// Largest deviation `|g(e_a, e_b) − η_ab|` (diagnostic for re-orthonormalisation).
+    pub fn orthonormality_error(&self, g_lo: &Mat4<T>) -> T {
+        let mut worst = T::zero();
+        for a in 0..4 {
+            for b in 0..4 {
+                let eta = match (a, b) {
+                    (0, 0) => -T::one(),
+                    _ if a == b => T::one(),
+                    _ => T::zero(),
+                };
+                worst = worst.max((inner(g_lo, &self.e_up[a], &self.e_up[b]) - eta).abs());
+            }
+        }
+        worst
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Kerr;
+    use crate::linalg::eta;
+    use crate::test_util::event;
+    use proptest::prelude::*;
+
+    #[test]
+    fn minkowski_identity_tetrad() {
+        let g = eta::<f64>();
+        let seeds = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let t = Tetrad::gram_schmidt(&g, &seeds).unwrap();
+        assert_eq!(t.e_up, seeds);
+    }
+
+    #[test]
+    fn rejects_non_timelike_velocity() {
+        let g = eta::<f64>();
+        let seeds = [
+            [1.0, 2.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        assert!(Tetrad::gram_schmidt(&g, &seeds).is_none());
+        let degenerate = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        assert!(Tetrad::gram_schmidt(&g, &degenerate).is_none());
+    }
+
+    proptest! {
+        #[test]
+        fn gram_schmidt_is_orthonormal_in_kerr((a, pos) in event(), v in proptest::array::uniform3(-0.5..0.5_f64)) {
+            // Observer u = n + w (0, v): n^μ = −g^{μt} is the KS-normal observer (∇t is timelike everywhere in
+            // KS, also inside the horizon); w is halved until u is safely timelike (deterministic, no rejects).
+            let k = Kerr::new(a).unwrap();
+            let g = k.g_lo(&pos);
+            let g_up = k.g_up(&pos);
+            let n = [-g_up[0][0], -g_up[1][0], -g_up[2][0], -g_up[3][0]];
+            let mut w = 1.0;
+            let mut u = n;
+            for _ in 0..60 {
+                u = [n[0], n[1] + w * v[0], n[2] + w * v[1], n[3] + w * v[2]];
+                if inner(&g, &u, &u) < 0.5 * inner(&g, &n, &n) {
+                    break;
+                }
+                w *= 0.5;
+            }
+            let seeds = [u, [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+            let t = Tetrad::gram_schmidt(&g, &seeds).unwrap();
+            // Entries of g are ~(1 + f) ≲ 8; two Gram–Schmidt passes keep errors at a few ε of that.
+            prop_assert!(t.orthonormality_error(&g) < 1e-12);
+            // e_(0) is parallel to u with the same time orientation.
+            prop_assert!(t.u()[0] > 0.0);
+            let ratio = t.u()[1] / t.u()[0];
+            prop_assert!((ratio - u[1] / u[0]).abs() < 1e-12 * (1.0 + (u[1] / u[0]).abs()));
+        }
+    }
+}
