@@ -50,6 +50,8 @@ pub const TONEMAP: ShaderModule = wgsl_module!("tonemap.wgsl");
 pub const PRESENT: ShaderModule = wgsl_module!("present.wgsl");
 /// FR-R6 debug views.
 pub const DEBUG: ShaderModule = wgsl_module!("debug.wgsl");
+/// Frame statistics (log-average luminance partials, ray-status counts).
+pub const STATS: ShaderModule = wgsl_module!("stats.wgsl");
 /// Entry points for the parity harness.
 pub const TEST_RAYS: ShaderModule = wgsl_module!("test_rays.wgsl");
 
@@ -107,8 +109,12 @@ pub const PRESENT_MODULES: [ShaderModule; 3] = [COMMON, TONEMAP_OPS, PRESENT];
 /// Modules of the debug-view shader.
 pub const DEBUG_MODULES: [ShaderModule; 3] = [COMMON, GBUFFER, DEBUG];
 
+/// Modules of the statistics shader.
+pub const STATS_MODULES: [ShaderModule; 3] = [COMMON, GBUFFER, STATS];
+
 /// Every assembled shader (name, modules), for validation tests.
-pub const ALL_SHADERS: [(&str, &[ShaderModule]); 6] = [
+pub const ALL_SHADERS: [(&str, &[ShaderModule]); 7] = [
+    ("stats", &STATS_MODULES),
     ("test_rays", &TEST_RAY_MODULES),
     ("trace_pixels", &TRACE_PIXEL_MODULES),
     ("shade", &SHADE_MODULES),
@@ -116,6 +122,11 @@ pub const ALL_SHADERS: [(&str, &[ShaderModule]); 6] = [
     ("debug", &DEBUG_MODULES),
     ("present", &PRESENT_MODULES),
 ];
+
+/// Source of the frame-statistics shader (entry point `stats_main`).
+pub fn stats_shader() -> String {
+    assemble(&STATS_MODULES)
+}
 
 /// Source of the test-ray shader (entry points `trace_rk4_main`, `trace_dopri5_main`, `eval_rhs_main`).
 pub fn test_ray_shader() -> String {

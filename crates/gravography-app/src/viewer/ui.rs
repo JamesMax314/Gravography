@@ -28,6 +28,8 @@ pub struct Status {
     pub message: String,
     /// Mouse-look state: the cursor is captured.
     pub mouse_captured: bool,
+    /// GPU time of the last timed sample, milliseconds.
+    pub gpu_ms: Option<f64>,
 }
 
 /// Editable copies of the flight controls.
@@ -204,7 +206,15 @@ fn render_section(ui: &mut egui::Ui, settings: &mut ViewSettings, actions: &mut 
                 &mut settings.render_scale,
                 RENDER_SCALE_RANGE.0..=RENDER_SCALE_RANGE.1,
             )
-            .text("render scale"),
+            .text("still scale"),
+        );
+        ui.checkbox(
+            &mut settings.dynamic_resolution,
+            "dynamic resolution while moving",
+        );
+        ui.add_enabled(
+            settings.dynamic_resolution,
+            egui::Slider::new(&mut settings.target_fps, 30.0..=120.0).text("target fps"),
         );
         ui.checkbox(&mut settings.exposure.auto, "auto exposure");
         let label = if settings.exposure.auto {
@@ -273,8 +283,11 @@ pub fn hud_lines(hud: &Hud, status: &Status, settings: &FlightSettings, render_s
             if settings.paused { "   PAUSED" } else { "" }
         ),
         format!(
-            "{:.0} fps   scale {:.2} ({}×{})   samples {}/{}",
+            "{:.0} fps   GPU {}   scale {:.2} ({}×{})   samples {}/{}",
             status.fps,
+            status
+                .gpu_ms
+                .map_or_else(|| "—".to_string(), |m| format!("{m:.1} ms")),
             render_scale,
             status.render_size.0,
             status.render_size.1,
