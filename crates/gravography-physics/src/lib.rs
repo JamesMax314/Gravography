@@ -16,6 +16,7 @@ pub mod invariants;
 pub mod kerr;
 pub mod kerr_schild;
 pub mod linalg;
+pub mod observer;
 pub mod ode;
 pub mod ray;
 pub mod scalar;
@@ -24,7 +25,7 @@ mod test_util;
 pub mod tetrad;
 
 pub use connection::{Christoffel, ks_christoffel};
-pub use error::PhysicsError;
+pub use error::{ObserverError, PhysicsError};
 pub use geodesic::{ks_hamiltonian, ks_hamiltonian_rhs};
 pub use kerr::Kerr;
 pub use kerr_schild::{
@@ -32,6 +33,7 @@ pub use kerr_schild::{
     ks_g_up, ks_radius,
 };
 pub use linalg::{Mat4, Vec4};
+pub use observer::{AdvanceReport, Motion, Observer, ObserverParams, Region};
 pub use ray::{RayResult, RayStatus, TraceParams, camera_ray_momentum, sky_frequency_shift, trace_ray};
 pub use scalar::Real;
 pub use tetrad::Tetrad;
