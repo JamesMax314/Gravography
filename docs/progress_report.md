@@ -35,8 +35,9 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
   screen is laggy**. The cause is analysed under WP-11 "Known issues"; the fix belongs to WP-12.
 - Open questions for the user:
   - The example scenes use auto exposure with −2 EV (−4 EV inside the horizon), chosen by eye. Adjust to taste.
-  - Please try the WP-11 manual checklist items marked **user** (live mouse look, keyboard focus, the feel of the
-    controls). The agent cannot see or drive the live window.
+  - Please try the WP-11 manual checklist items marked **user** (keyboard focus, the feel of the controls) and the
+    captured mouse look (right-click, move the mouse, Esc). The agent can now capture the composed window in the
+    smoke test, but it still cannot drive real mouse or keyboard input.
 
 ---
 
@@ -92,6 +93,63 @@ Template for each entry (copy above the previous entry):
 **Notes for the next agent**
 -
 -->
+
+## WP-11 follow-up — Viewer UI fixes — 2026-10-30 — COMPLETE
+
+User report after WP-11: "I don't seem to be able to see the HUD or controls … the movement with the keys works
+but the mouse movement doesn't seem to." Fixed on branch `wp-11-ui-fixes`, merged without a new tag (`wp-11`
+is left where it was).
+
+**Summary**
+- **Root cause, unreadable panel and HUD:** egui 0.37's `default` feature set is empty, and the bundled fonts
+  sit behind `default_fonts`. With no font, every character is drawn as a solid box. This affected WP-10 too;
+  nobody had seen the live window.
+  - **Fix:** `egui` gets `features = ["default_fonts"]`.
+  - `⏸`, `▶` and `☉` are not in the bundled fonts, so they were replaced with "Pause"/"Resume" and "M_sun".
+- **Latent bug:** egui texture deltas (the font atlas comes once, on the first frame) were uploaded *after*
+  `get_current_texture`. A skipped first frame would have lost the atlas for good. The upload now comes first.
+- **Mouse look:** the left-drag code worked: a drag through the viewer's handlers turns the view (smoke test).
+  Two problems remained:
+  - the only hint ("drag: look around") was unreadable;
+  - there was no "move the mouse to look" mode.
+
+  Changes:
+  - new `input::MouseLook` state machine (unit-tested), covering left-drag ("grab the sky") and right-click
+    captured look (FPS convention, via `DeviceEvent::MouseMotion`; the cursor is locked and hidden);
+  - right-click, Esc or focus loss releases the capture; Esc quits only when nothing is captured;
+  - a hint line under the Flight section.
+- **Window-frame capture (`viewer/capture.rs`):**
+  - the surface is configured with `COPY_SRC` where supported;
+  - after each smoke-test screenshot, the next presented frame is copied to `window-<name>.png`, including the
+    panel and HUD;
+  - this is the first agent-side view of the composed window, and it is how the font bug was found.
+
+**Decisions & deviations**
+- **Captured cursor in addition to drag.** FR-O1 allows either, and the user expected plain mouse movement to
+  look around. Right-click toggles it, so a drag still works without capturing.
+- **Dependency change:** the `default_fonts` feature on `egui`, which adds `epaint_default_fonts` (OFL/Ubuntu
+  font licences, embedded by egui). **TODO WP-13:** list the fonts in `THIRD_PARTY.md`.
+
+**Tests**
+- `cargo test --workspace`: **231 passed, 3 ignored**. New tests:
+  - `drag_looks_only_from_the_3d_view`;
+  - `right_click_toggles_captured_look`;
+  - `rows_are_aligned_and_unpadded` (capture row unpadding).
+- **Smoke test** (passes), which now also:
+  - drags 200 px right and 100 px down via the handlers, giving yaw +11.5° and pitch +5.7°;
+  - writes three window captures.
+
+**Visual checks**
+- **Window capture, before the fix:** the panel and HUD were laid out but every glyph was a filled box.
+- **After the fix:** readable panel (Flight, Presets, collapsed sections, Keys) and HUD. At hover r = 30:
+  τ, KS t, r = 30.0000, θ = 90°, φ = 0°, β = 0, γ = 1, acceleration 1.150e-3 c²/M = 7.14e8 g, "outside the
+  ergosphere, hovering", fps, scale and ray rates.
+- **Infall start at r = 8, a = 0.5:** v vs ZAMO = 0.49976 c, close to √(2M/r) = 0.5 for a = 0, as expected.
+
+**Known issues / tech debt**
+- **HUD width:** the HUD window wraps long lines (about 420 logical px). Cosmetic; WP-13 polish.
+- **Untested on hardware:** captured mouse look needs the live window (raw `DeviceEvent`s cannot be injected
+  here). **User:** right-click, move the mouse, then press Esc.
 
 ## WP-11 — Interactive flight — 2026-10-30 — COMPLETE
 

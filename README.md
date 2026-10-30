@@ -47,14 +47,15 @@ once it is still, samples accumulate up to the sample target.
 
 | Input | Action |
 |---|---|
-| drag (left mouse) | look around (a view rotation, not a physical one) |
+| left-drag | look around ("grab the sky"; a view rotation, not a physical one) |
+| right-click | toggle captured mouse look: the cursor hides and mouse motion turns the view; right-click or **Esc** releases |
 | **W / S**, **A / D**, **R / F** | thrust forward/back, left/right, up/down, relative to where you look |
 | **Space** | cut thrust: stop station keeping and fall freely |
 | **Enter** | pause / resume; **.** single step while paused |
 | **[ / ]** | halve / double the time warp |
 | **- / =** | halve / double the thrust |
 | **P** | screenshot (tone-mapped PNG + linear HDR EXR at full window resolution, in `screenshots/` or `--screenshot-dir`) |
-| **Esc** | quit |
+| **Esc** | release captured mouse look, otherwise quit |
 
 The left panel has these sections:
 
@@ -83,7 +84,8 @@ then resets to the last preset, paused, with a message.
 
 `--smoke-test` runs a scripted check for automated verification. It renders, takes a screenshot, resizes the
 window, renders and takes a screenshot again. It then sets `a = 0.5`, falls from `r = 8` through the horizon,
-takes a screenshot inside and exits.
+takes a screenshot inside and exits. It also drags the view through the viewer's mouse handlers, and after each
+screenshot it saves a capture of the composed window, panel and HUD included (`window-*.png`).
 
 ## Headless rendering
 
