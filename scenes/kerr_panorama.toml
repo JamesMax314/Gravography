@@ -1,0 +1,24 @@
+# Full-sphere (equirectangular) view from a static observer at r = 8 M, 80° from the spin axis of an a = 0.9 hole.
+# Expect: the shadow at the centre (forward = toward the hole) with angular radius ≈ 34° (Schwarzschild estimate
+# sin α = (3√3/r) sqrt(1 − 2/r) ≈ 0.56 at r = 8), flattened on the left and shifted right by the spin; the galactic
+# band (a great circle) as a sinusoid across the map with lensed images around the shadow; the sky toward the
+# left/right edges looks away from the hole. Static observer: the whole sky is blueshifted by
+# g = (−g_tt)^{-1/2} ≈ 1.155.
+
+[spacetime]
+spin = 0.9
+
+[observer]
+preset = "hover"
+r = 8.0
+theta_deg = 80.0
+phi_deg = 0.0
+
+[camera]
+width = 960
+height = 480
+projection = { kind = "equirectangular" }
+samples = 4
+
+[render]
+exposure = { auto = true, ev = -2.0 }

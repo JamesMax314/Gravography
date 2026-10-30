@@ -16,6 +16,7 @@ pub mod diffuse;
 pub mod error;
 pub mod planck;
 pub mod rng;
+pub mod texture;
 
 pub use bake::{SkyParams, bake, bake_sky};
 pub use band::{Band, BlackbodyLut, LutSample};
@@ -25,3 +26,4 @@ pub use cmf::Cmf;
 pub use cubemap::{CubeLevel, CubeMap};
 pub use diffuse::DiffuseBandParams;
 pub use error::SkyError;
+pub use texture::{EquirectImage, cube_from_equirect};

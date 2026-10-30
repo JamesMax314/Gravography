@@ -99,6 +99,38 @@ pub fn write_rgb8_png(path: &Path, width: u32, height: u32, bytes: Vec<u8>) -> R
     Ok(())
 }
 
+/// Reads an equirectangular linear-radiance image for the texture sky (`docs/PRD.md` §6.5): OpenEXR (`.exr`) or
+/// Radiance HDR (`.hdr`). 8-bit formats are refused, since they are display-encoded, not radiance.
+///
+/// # Errors
+/// Unsupported extension, I/O or decoding errors, or an empty image.
+pub fn load_equirect(path: &Path) -> Result<gravography_sky::EquirectImage, RenderError> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    if ext != "exr" && ext != "hdr" {
+        return Err(RenderError::InvalidScene(format!(
+            "sky texture {} must be an .exr or .hdr image (linear radiance)",
+            path.display()
+        )));
+    }
+    let img = image::open(path)?.into_rgb32f();
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    if w == 0 || h == 0 {
+        return Err(RenderError::InvalidScene(format!(
+            "sky texture {} is empty",
+            path.display()
+        )));
+    }
+    Ok(gravography_sky::EquirectImage {
+        width: w,
+        height: h,
+        pixels: img.pixels().map(|p| p.0).collect(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

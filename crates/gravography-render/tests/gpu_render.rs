@@ -81,9 +81,14 @@ fn test_scene(path: &Path, w: u32, h: u32, samples: u32) -> (FrameParams, Sky) {
     scene.camera.samples = samples;
     scene.sky.face_size = 256;
     scene.sky.star_count = 20_000;
+    // The star field is defined in human vision (the bake uses it for flux → solid angle); the scene's band
+    // selects the table and display mapping used for shading.
     let lut = BlackbodyLut::human_vision();
     let (_, cube) = bake_sky(&scene.sky_params().expect("valid sky"), &lut).expect("bake");
-    (scene.frame().expect("valid frame"), Sky::new(cube, lut))
+    (
+        scene.frame().expect("valid frame"),
+        Sky::new(cube, scene.sky.band.lut()),
+    )
 }
 
 fn test16(w: u32, h: u32, samples: u32, name: &str) {
@@ -449,7 +454,7 @@ fn gpu_timer_measures_a_sample() {
     let path = &scene_files()[2];
     let renderer = GpuRenderer::new(&ctx);
     let params = TraceParams::gpu_default();
-    let mut timer = GpuTimer::new();
+    let mut timer = GpuTimer::new(&ctx);
     let mut time = |w: u32, h: u32| {
         let (frame, sky) = test_scene(path, w, h, 1);
         let gpu_sky = GpuSky::upload(&ctx, &sky).expect("upload");

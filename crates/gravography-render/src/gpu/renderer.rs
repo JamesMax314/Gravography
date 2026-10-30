@@ -4,7 +4,6 @@
 
 use bytemuck::{Pod, Zeroable};
 use gravography_physics::{RayStatus, TraceParams};
-use gravography_sky::colour::xyz_to_linear_srgb_matrix;
 use wgpu::util::DeviceExt;
 
 use super::GpuContext;
@@ -94,6 +93,8 @@ pub struct GpuSky {
     mip_count: u32,
     lut_n: u32,
     lut_range: (f32, f32),
+    /// Band display matrix (channels → linear sRGB), rows.
+    display: [[f32; 4]; 3],
 }
 
 impl GpuSky {
@@ -167,8 +168,37 @@ impl GpuSky {
             mip_count,
             lut_n: sky.lut.entries.len() as u32,
             lut_range: (sky.lut.t_min as f32, sky.lut.t_max as f32),
+            display: display_rows(&sky.lut),
         })
     }
+
+    /// Replaces the band table (switching observing bands without re-uploading the cube map).
+    ///
+    /// # Errors
+    /// [`RenderError::Gpu`] if the table has fewer than 2 entries.
+    pub fn set_lut(
+        &mut self,
+        ctx: &GpuContext,
+        lut: &gravography_sky::BlackbodyLut,
+    ) -> Result<(), RenderError> {
+        if lut.entries.len() < 2 {
+            return Err(RenderError::Gpu("the LUT needs at least 2 entries".into()));
+        }
+        self.lut = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("blackbody LUT"),
+            contents: bytemuck::cast_slice(&lut.entries),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        self.lut_n = lut.entries.len() as u32;
+        self.lut_range = (lut.t_min as f32, lut.t_max as f32);
+        self.display = display_rows(lut);
+        Ok(())
+    }
+}
+
+fn display_rows(lut: &gravography_sky::BlackbodyLut) -> [[f32; 4]; 3] {
+    let m = lut.display;
+    core::array::from_fn(|i| [m[i][0] as f32, m[i][1] as f32, m[i][2] as f32, 0.0])
 }
 
 /// The result of a GPU render that stays on the GPU: the G-buffer of the last sample and the accumulation buffer
@@ -345,12 +375,10 @@ impl GpuRenderer {
         sample_index: u32,
     ) -> Result<(), RenderError> {
         let dev = &ctx.device;
-        let m = xyz_to_linear_srgb_matrix();
-        let row = |i: usize| [m[i][0] as f32, m[i][1] as f32, m[i][2] as f32, 0.0];
         let jitter = sample_offset(sample_index);
         self.tracer.trace(ctx, frame, params, jitter, &target.gbuffer)?;
         let shade = GpuShadeParams {
-            xyz_to_rgb: [row(0), row(1), row(2)],
+            xyz_to_rgb: sky.display,
             lut_t_min: sky.lut_range.0,
             lut_t_max: sky.lut_range.1,
             lut_n: sky.lut_n,

@@ -9,6 +9,7 @@
 pub mod capture;
 pub mod flight;
 pub mod input;
+pub mod persist;
 pub mod screenshot;
 pub mod state;
 pub mod ui;
@@ -19,7 +20,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
 use gravography_physics::TraceParams;
-use gravography_render::camera::Projection;
 use gravography_render::gpu::{GpuContext, GpuFrame, GpuRenderer, GpuSky, GpuStats, GpuTimer, Presenter};
 use gravography_render::output::write_rgb8_png;
 use gravography_render::scene::{ObserverSpec, PresetKind};
@@ -32,13 +32,14 @@ use winit::keyboard::PhysicalKey;
 use winit::window::{CursorGrabMode, Window, WindowId};
 
 use self::flight::{Camera, Flight, Hud, check_preset};
-use self::input::{KeyAction, LookButton, MouseLook, ThrustKeys, degrees_per_pixel, key_action};
+use self::input::{KeyAction, LookButton, MouseLook, ThrustKeys, key_action};
+use self::persist::{Bookmark, CameraPath, Playback, Recorder, file_stem, list_ron, load_ron, save_ron};
 use self::screenshot::screenshot_paths;
 use self::state::{
     Accumulation, DynamicResolution, MOVE_HOLD, Metering, RESIZE_SETTLE, ViewSettings, gpu_budget_ms,
     internal_size, min_moving_scale,
 };
-use self::ui::{FlightPanel, Status, hud_lines, hud_window, settings_panel};
+use self::ui::{FlightPanel, PersistPanel, Status, hud_lines, hud_window, settings_panel};
 
 /// Viewer start-up options.
 pub struct ViewerOptions {
@@ -51,6 +52,12 @@ pub struct ViewerOptions {
     /// Scripted check: converge, screenshot, resize, converge, screenshot, fall through the horizon, converge,
     /// screenshot, exit.
     pub smoke_test: bool,
+    /// Start from this bookmark.
+    pub bookmark: Option<Bookmark>,
+    /// Where bookmarks are saved and listed.
+    pub bookmark_dir: PathBuf,
+    /// Where camera paths are saved and listed.
+    pub path_dir: PathBuf,
 }
 
 /// Opens the viewer window and runs until it is closed (or the smoke test finishes).
@@ -85,8 +92,10 @@ enum SmokeStage {
     Converge2,
     /// Falling until inside the horizon, then pause.
     Falling,
-    /// Wait for convergence inside the horizon, then screenshot.
+    /// Wait for convergence inside the horizon, then screenshot and play the recorded fall back.
     Converge3,
+    /// Playing the recorded path until it ends, then bookmark round trip.
+    Replaying,
     /// One more redraw for the last window capture, then exit.
     Finish,
     /// Finished.
@@ -154,6 +163,19 @@ struct Gfx {
     layout: (u32, u32),
     /// A resize is waiting to settle ([`RESIZE_SETTLE`]).
     resize_pending: Option<Instant>,
+    /// Bookmarks and camera paths panel.
+    persist: PersistPanel,
+    /// Files behind `persist.bookmarks` / `persist.paths`.
+    bookmark_files: Vec<PathBuf>,
+    path_files: Vec<PathBuf>,
+    /// Camera path being recorded.
+    recorder: Option<Recorder>,
+    /// Camera path being played back.
+    playback: Option<Playback>,
+    /// Directory for camera paths (saved when a recording stops outside the panel).
+    path_dir: PathBuf,
+    /// Re-read the file lists on the next frame.
+    pending_refresh: bool,
 }
 
 impl ApplicationHandler for App {
@@ -213,7 +235,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                gfx.cursor_moved((position.x, position.y), &self.opts);
+                gfx.cursor_moved((position.x, position.y));
             }
             WindowEvent::Focused(false) => {
                 // Key releases are lost while unfocused: drop held keys so thrust does not stick.
@@ -238,7 +260,7 @@ impl ApplicationHandler for App {
     fn device_event(&mut self, _event_loop: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
         // Raw motion drives the captured mouse look (the cursor itself is locked and hidden).
         if let (Some(gfx), DeviceEvent::MouseMotion { delta }) = (self.gfx.as_mut(), event) {
-            let deg = gfx.degrees_per_pixel(&self.opts);
+            let deg = gfx.degrees_per_pixel();
             if let Some((dy, dp)) = gfx.mouse.raw_motion(delta, deg) {
                 gfx.flight.look_by(dy, dp);
                 gfx.window.request_redraw();
@@ -302,13 +324,13 @@ impl App {
                         f64::from(gfx.config.width) * 0.6,
                         f64::from(gfx.config.height) * 0.5,
                     );
-                    gfx.cursor_moved((cx, cy), &self.opts);
+                    gfx.cursor_moved((cx, cy));
                     gfx.mouse_button(LookButton::Left, true, false);
                     anyhow::ensure!(
                         gfx.mouse.dragging(),
                         "a left press over the 3D view did not start a drag"
                     );
-                    gfx.cursor_moved((cx + 200.0, cy + 100.0), &self.opts);
+                    gfx.cursor_moved((cx + 200.0, cy + 100.0));
                     gfx.mouse_button(LookButton::Left, false, false);
                     let look = gfx.flight.look;
                     anyhow::ensure!(
@@ -332,6 +354,14 @@ impl App {
                     gfx.flight.apply_preset(&infall).map_err(|e| anyhow!(e))?;
                     gfx.flight.settings.time_warp = 4.0;
                     gfx.flight.settings.paused = false;
+                    // Record the fall as a camera path (FR-O7).
+                    gfx.persist.interval = 0.5;
+                    gfx.recorder = Some(Recorder::start(
+                        &gfx.flight,
+                        0.5,
+                        &gfx.settings,
+                        &self.opts.scene.sky,
+                    ));
                     self.smoke = SmokeStage::Falling;
                     Ok(())
                 })
@@ -350,6 +380,9 @@ impl App {
                         "smoke test: inside the horizon at r = {:.3} M, τ = {:.3} M",
                         hud.r, hud.tau
                     );
+                    gfx.persist.name = "smoke-fall".into();
+                    gfx.stop_recording("smoke test");
+                    println!("smoke test: {}", gfx.status.message);
                     println!(
                         "smoke test: while falling {:.0} fps, GPU {:.1} ms/sample, dynamic scale {:.3} ({}×{} of {}×{})",
                         gfx.status.fps,
@@ -367,13 +400,35 @@ impl App {
             SmokeStage::Converge3
                 if gfx.accum.converged() && !gfx.stats.in_flight() && !gfx.metering.due() =>
             {
-                gfx.smoke_screenshot(&self.opts).map(|_| {
-                    self.smoke = SmokeStage::Finish;
+                gfx.smoke_screenshot(&self.opts).and_then(|_| {
+                    // Play the recorded fall back quickly (FR-O7).
+                    let file = self.opts.path_dir.join("smoke-fall.ron");
+                    let path: CameraPath = load_ron(&file)?;
+                    anyhow::ensure!(
+                        path.samples.len() >= 10,
+                        "only {} samples recorded",
+                        path.samples.len()
+                    );
+                    let first_tau = path.samples[0].observer.tau;
+                    for (k, s) in path.samples.iter().enumerate() {
+                        anyhow::ensure!(
+                            (s.observer.tau - first_tau - 0.5 * k as f64).abs() < 1e-9,
+                            "sample {k} at τ = {} is not on the 0.5 M grid",
+                            s.observer.tau
+                        );
+                    }
+                    gfx.playback = Some(Playback::new(path, 20.0)?);
+                    self.smoke = SmokeStage::Replaying;
+                    Ok(())
                 })
             }
+            SmokeStage::Replaying if gfx.playback.is_none() => gfx.smoke_bookmark(&self.opts).map(|_| {
+                self.smoke = SmokeStage::Finish;
+            }),
             SmokeStage::Finish if gfx.capture_to.is_none() => {
                 println!(
-                    "smoke test passed: rendered, resized, flew through the horizon and wrote screenshots at each stage"
+                    "smoke test passed: rendered, resized, flew through the horizon, replayed the recorded path, \
+                     round-tripped a bookmark and wrote screenshots at each stage"
                 );
                 self.smoke = SmokeStage::Done;
                 event_loop.exit();
@@ -442,8 +497,11 @@ impl Gfx {
         let egui_renderer =
             egui_wgpu::Renderer::new(&ctx.device, format, egui_wgpu::RendererOptions::default());
 
-        let flight = Flight::new(opts.scene.kerr()?, &opts.scene.observer).map_err(|e| anyhow!(e))?;
+        let mut flight = Flight::new(opts.scene.kerr()?, &opts.scene.observer).map_err(|e| anyhow!(e))?;
         let mut settings = ViewSettings::from_scene(&opts.scene);
+        if let Some(b) = &opts.bookmark {
+            b.apply(&mut flight, &mut settings, &opts.scene.sky)?;
+        }
         if opts.smoke_test {
             // Few samples so the scripted check converges quickly.
             settings.samples = 4;
@@ -453,9 +511,12 @@ impl Gfx {
         let target = GpuFrame::new(&ctx, w, h, TraceParams::<f32>::gpu_default().max_steps);
         let status = Status {
             gpu: ctx.describe(),
+            sky_note: opts.scene.sky.texture.as_ref().map(|t| {
+                format!("Texture sky {t}: APPROXIMATE colours (each pixel shown as a blackbody fitted to its colour)")
+            }),
             ..Status::default()
         };
-        Ok(Self {
+        let mut gfx = Self {
             window,
             surface,
             config,
@@ -483,13 +544,29 @@ impl Gfx {
             last_update: Instant::now(),
             capture_to: None,
             dynres: DynamicResolution::new(min_moving_scale(window_size).max(0.5)),
-            timer: GpuTimer::new(),
+            timer: GpuTimer::new(&ctx),
             stats: GpuStats::new(&ctx),
             last_move: None,
             layout: window_size,
             resize_pending: None,
+            persist: PersistPanel {
+                interval: 0.5,
+                speed: 1.0,
+                ..PersistPanel::default()
+            },
+            bookmark_files: Vec::new(),
+            path_files: Vec::new(),
+            recorder: None,
+            playback: None,
+            path_dir: opts.path_dir.clone(),
+            pending_refresh: true,
             ctx,
-        })
+        };
+        if gfx.settings.band != opts.scene.sky.band {
+            // Started from a bookmark recorded in another band.
+            gfx.apply_band();
+        }
+        Ok(gfx)
     }
 
     /// Reconfigures the surface at once (cheap) but defers the new internal resolution until the size has been
@@ -577,9 +654,8 @@ impl Gfx {
     }
 
     /// Mouse-look sensitivity for the current window (degrees per physical pixel at the image centre).
-    fn degrees_per_pixel(&self, opts: &ViewerOptions) -> f64 {
-        let Projection::Rectilinear { fov_deg } = opts.scene.camera.projection;
-        degrees_per_pixel(fov_deg, self.config.height)
+    fn degrees_per_pixel(&self) -> f64 {
+        self.settings.projection.degrees_per_pixel(self.config.height)
     }
 
     /// A mouse button press or release (`consumed`: egui wants it).
@@ -590,8 +666,8 @@ impl Gfx {
     }
 
     /// Cursor moved: turns the view while dragging.
-    fn cursor_moved(&mut self, pos: (f64, f64), opts: &ViewerOptions) {
-        let deg = self.degrees_per_pixel(opts);
+    fn cursor_moved(&mut self, pos: (f64, f64)) {
+        let deg = self.degrees_per_pixel();
         if let Some((dy, dp)) = self.mouse.cursor_moved(pos, deg) {
             self.flight.look_by(dy, dp);
             self.window.request_redraw();
@@ -635,7 +711,7 @@ impl Gfx {
     }
 
     /// Frame parameters for a `width × height` render of the current camera with the current settings.
-    fn frame_params(&self, opts: &ViewerOptions, width: u32, height: u32) -> Result<FrameParams> {
+    fn frame_params(&self, width: u32, height: u32) -> Result<FrameParams> {
         let cam = self.flight.camera();
         let frame = FrameParams {
             kerr: cam.kerr,
@@ -643,7 +719,7 @@ impl Gfx {
             tetrad: cam.tetrad,
             width,
             height,
-            projection: opts.scene.camera.projection,
+            projection: self.settings.projection,
             samples: self.settings.samples,
             effects: self.settings.effects,
             exposure: self.settings.exposure,
@@ -651,6 +727,165 @@ impl Gfx {
         };
         frame.validate()?;
         Ok(frame)
+    }
+
+    /// One frame of the simulation: path playback (the camera follows the recorded samples), recording (flight
+    /// with samples at exact proper-time marks), or plain flight.
+    fn advance_flight(&mut self, dt: f64) -> flight::FrameUpdate {
+        if let Some(p) = self.playback.as_mut() {
+            let playing = p.advance(dt);
+            let sample = *p.current();
+            let kerr = p.kerr();
+            let mut out = flight::FrameUpdate::default();
+            match sample.observer.restore(&kerr, &self.flight) {
+                Ok(obs) => {
+                    self.flight.kerr = kerr;
+                    self.flight.observer = obs;
+                    self.flight.look = sample.look;
+                    out.advanced = true;
+                }
+                Err(e) => {
+                    self.playback = None;
+                    out.message = Some(format!("playback stopped: {e:#}"));
+                    return out;
+                }
+            }
+            if !playing {
+                self.playback = None;
+                self.flight.settings.paused = true;
+                out.message = Some("playback finished (paused at the last sample)".into());
+            }
+            return out;
+        }
+        if let Some(r) = self.recorder.as_mut() {
+            if r.compatible(&self.flight) {
+                return r.update(&mut self.flight, dt, &self.keys);
+            }
+            self.stop_recording("the spin changed, so the recording stopped");
+        }
+        self.flight.update(dt, &self.keys)
+    }
+
+    /// Uploads the table of the selected band and its exposure reference (the cube map stays).
+    fn apply_band(&mut self) {
+        let lut = self.settings.band.lut();
+        match self.sky.set_lut(&self.ctx, &lut) {
+            Ok(()) => {
+                self.reference_luminance = lut.reference_luminance();
+                self.log_average = None;
+                self.status.message = format!("band: {}", lut.name);
+            }
+            Err(e) => self.status.message = format!("switching band failed: {e}"),
+        }
+        self.restart(true);
+    }
+
+    /// Re-reads the bookmark and path directories.
+    fn refresh_files(&mut self, opts: &ViewerOptions) {
+        let stem = |p: &PathBuf| {
+            p.file_stem()
+                .map_or_else(String::new, |s| s.to_string_lossy().into())
+        };
+        self.bookmark_files = list_ron(&opts.bookmark_dir);
+        self.path_files = list_ron(&opts.path_dir);
+        self.persist.bookmarks = self.bookmark_files.iter().map(stem).collect();
+        self.persist.paths = self.path_files.iter().map(stem).collect();
+    }
+
+    /// File name for the panel's name field, or a timestamped default.
+    fn file_name(&self, kind: &str) -> String {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        format!(
+            "{}.ron",
+            file_stem(&self.persist.name, &format!("{kind}-{stamp}"))
+        )
+    }
+
+    /// Stops recording and saves the path to the path directory.
+    fn stop_recording(&mut self, why: &str) {
+        let Some(r) = self.recorder.take() else {
+            return;
+        };
+        let path: CameraPath = r.finish();
+        let file = self.path_dir.join(self.file_name("path"));
+        self.status.message = match save_ron(&path, &file) {
+            Ok(()) => format!(
+                "{why}: saved {} samples to {}",
+                path.samples.len(),
+                file.display()
+            ),
+            Err(e) => format!("{why}; saving the path failed: {e:#}"),
+        };
+        self.pending_refresh = true;
+    }
+
+    /// Bookmark and camera-path actions from the panel.
+    fn apply_persist(&mut self, opts: &ViewerOptions, actions: ui::Actions) {
+        if actions.refresh_files || std::mem::take(&mut self.pending_refresh) {
+            self.refresh_files(opts);
+        }
+        if actions.save_bookmark {
+            let b = Bookmark::capture(&self.flight, &self.settings, &opts.scene.sky);
+            let file = opts.bookmark_dir.join(self.file_name("bookmark"));
+            self.status.message = match save_ron(&b, &file) {
+                Ok(()) => format!("bookmark saved to {}", file.display()),
+                Err(e) => format!("saving the bookmark failed: {e:#}"),
+            };
+            self.refresh_files(opts);
+        }
+        if let Some(file) = actions
+            .load_bookmark
+            .and_then(|i| self.bookmark_files.get(i).cloned())
+        {
+            let result = load_ron::<Bookmark>(&file)
+                .and_then(|b| b.apply(&mut self.flight, &mut self.settings, &opts.scene.sky));
+            self.status.message = match result {
+                Ok(None) => format!("loaded {}", file.display()),
+                Ok(Some(w)) => format!("loaded {}; {w}", file.display()),
+                Err(e) => format!("loading {} failed: {e:#}", file.display()),
+            };
+            self.recorder = None;
+            self.playback = None;
+            self.editor = *self.flight.preset();
+            self.apply_band();
+        }
+        if actions.start_recording && self.playback.is_none() {
+            self.recorder = Some(Recorder::start(
+                &self.flight,
+                self.persist.interval,
+                &self.settings,
+                &opts.scene.sky,
+            ));
+            self.status.message = format!(
+                "recording a camera path every {} M of proper time",
+                self.recorder.as_ref().map_or(0.0, Recorder::interval)
+            );
+        }
+        if actions.stop_recording {
+            self.stop_recording("recording stopped");
+        }
+        if let Some(file) = actions.play_path.and_then(|i| self.path_files.get(i).cloned()) {
+            let result = load_ron::<CameraPath>(&file).and_then(|p| Playback::new(p, self.persist.speed));
+            match result {
+                Ok(p) => {
+                    self.status.message =
+                        format!("playing {} ({} samples)", file.display(), p.path().samples.len());
+                    self.playback = Some(p);
+                }
+                Err(e) => self.status.message = format!("loading {} failed: {e:#}", file.display()),
+            }
+        }
+        if let Some(p) = self.playback.as_mut() {
+            p.speed = self.persist.speed;
+            p.looping = self.persist.looping;
+        }
+        if actions.stop_playback {
+            self.playback = None;
+            self.status.message = "playback stopped".into();
+        }
     }
 
     /// Applies the panel's flight changes and actions.
@@ -695,6 +930,12 @@ impl Gfx {
         let mut actions = ui::Actions::default();
         self.status.mouse_captured = self.mouse.captured();
         let status = self.status.clone();
+        self.persist.recording = self.recorder.as_ref().map(Recorder::len);
+        self.persist.playing = self
+            .playback
+            .as_ref()
+            .map(|p| (p.index(), p.path().samples.len()));
+        let mut persist = self.persist.clone();
         let mut panel = FlightPanel {
             settings: self.flight.settings,
             spin: self.flight.kerr.spin(),
@@ -709,24 +950,30 @@ impl Gfx {
         );
         let out = self.egui_ctx.run_ui(raw, |ui| {
             egui::Panel::left("settings").show(ui, |ui| {
-                actions = settings_panel(ui, &mut settings, &mut panel, &check, &status);
+                actions = settings_panel(ui, &mut settings, &mut panel, &mut persist, &check, &status);
             });
             hud_window(ui.ctx(), &hud);
         });
         self.egui_state
             .handle_platform_output(&self.window, out.platform_output);
         let reset = self.settings.resets_accumulation(&settings);
+        let band_changed = self.settings.band != settings.band;
         self.settings = settings;
+        if band_changed {
+            self.apply_band();
+        }
         if reset {
             self.restart(true);
         }
+        self.persist = persist;
         self.apply_panel(panel, actions);
+        self.apply_persist(opts, actions);
 
         // Advance the observer; restart accumulation if the camera moved.
         let now = Instant::now();
         let dt = now.duration_since(self.last_update).as_secs_f64();
         self.last_update = now;
-        let update = self.flight.update(dt, &self.keys);
+        let update = self.advance_flight(dt);
         if let Some(m) = update.message {
             self.status.message = m;
         }
@@ -761,7 +1008,7 @@ impl Gfx {
 
         // One progressive sample per frame until converged.
         if let Some(s) = self.accum.next_sample() {
-            let frame = self.frame_params(opts, self.target.width, self.target.height)?;
+            let frame = self.frame_params(self.target.width, self.target.height)?;
             self.timer.begin();
             self.renderer.render_sample(
                 &self.ctx,
@@ -919,7 +1166,7 @@ impl Gfx {
             self.status.ray_rates = Some(fs.status_fractions());
         }
         let (w, h) = (self.config.width, self.config.height);
-        let frame = self.frame_params(opts, w, h)?;
+        let frame = self.frame_params(w, h)?;
         let out = self
             .renderer
             .render(&self.ctx, &frame, &self.sky, &TraceParams::gpu_default())?;
@@ -938,6 +1185,47 @@ impl Gfx {
         write_image(&exr, &hdr, scale, self.settings.tone_map)?;
         println!("screenshot: {} and {} ({w}×{h})", png.display(), exr.display());
         Ok((png, exr))
+    }
+
+    /// Smoke test: save a bookmark, move away, load it, and require the exact same camera (FR-O6).
+    fn smoke_bookmark(&mut self, opts: &ViewerOptions) -> Result<()> {
+        anyhow::ensure!(
+            self.status.message.contains("playback finished"),
+            "playback did not finish normally: {}",
+            self.status.message
+        );
+        let before = self.flight.camera();
+        self.persist.name = "smoke".into();
+        let actions = ui::Actions {
+            save_bookmark: true,
+            ..ui::Actions::default()
+        };
+        self.apply_persist(opts, actions);
+        let index = self
+            .persist
+            .bookmarks
+            .iter()
+            .position(|b| b == "smoke")
+            .ok_or_else(|| anyhow!("bookmark not listed after saving: {}", self.status.message))?;
+        self.flight
+            .apply_preset(&flight::safe_preset())
+            .map_err(|e| anyhow!(e))?;
+        anyhow::ensure!(
+            self.flight.camera() != before,
+            "moving away did not change the camera"
+        );
+        let actions = ui::Actions {
+            load_bookmark: Some(index),
+            ..ui::Actions::default()
+        };
+        self.apply_persist(opts, actions);
+        anyhow::ensure!(
+            self.flight.camera() == before,
+            "the bookmark did not restore the camera exactly: {}",
+            self.status.message
+        );
+        println!("smoke test: bookmark saved and restored exactly; replayed the fall path");
+        Ok(())
     }
 
     /// Screenshot for the smoke test, checking that both files exist and the PNG has the window's size.

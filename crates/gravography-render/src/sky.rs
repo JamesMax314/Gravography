@@ -37,10 +37,15 @@ impl Sky {
         Self { cube, lut }
     }
 
-    /// Luminance `Y` of a solar-temperature blackbody filling the pixel (`w = 1`, `g = 1`): the manual-exposure
-    /// reference ([`crate::tonemap::Exposure::scale`]).
+    /// Luminance of a blackbody at the band's reference temperature filling the pixel (`w = 1`, `g = 1`): the
+    /// manual-exposure reference ([`crate::tonemap::Exposure::scale`]). Human vision: `Y` at [`SOLAR_TEMPERATURE`].
     pub fn reference_luminance(&self) -> f64 {
-        self.lut.lookup(SOLAR_TEMPERATURE).response[1]
+        self.lut.reference_luminance()
+    }
+
+    /// Converts a band response to linear sRGB with the band's display mapping (human vision: XYZ → sRGB).
+    pub fn to_rgb(&self, response: &[f64; 3]) -> [f64; 3] {
+        gravography_sky::colour::mat3_vec(&self.lut.display, response)
     }
 
     /// Solid angle of a level-0 texel at unit direction `d`: on a face with coordinates `s, t ∈ [−1, 1]`,

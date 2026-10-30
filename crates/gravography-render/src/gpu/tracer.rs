@@ -37,14 +37,24 @@ pub struct GpuCamera {
     pub flags: u32,
     /// Sub-pixel sample offset in `[0, 1)²`.
     pub jitter: [f32; 2],
+    /// [`PROJECTION_RECTILINEAR`] or [`PROJECTION_EQUIRECTANGULAR`].
+    pub projection: u32,
     /// Padding.
-    pub _pad: [u32; 2],
+    pub _pad: u32,
 }
+
+/// Projection code: rectilinear (WGSL `PROJECTION_RECTILINEAR`).
+pub const PROJECTION_RECTILINEAR: u32 = 0;
+/// Projection code: equirectangular (WGSL `PROJECTION_EQUIRECTANGULAR`).
+pub const PROJECTION_EQUIRECTANGULAR: u32 = 1;
 
 impl GpuCamera {
     /// Camera uniform for `frame` with sample offset `jitter` (pixel `(i, j)` is traced at `(i, j) + jitter`).
     pub fn new(frame: &FrameParams, jitter: (f64, f64)) -> Self {
-        let Projection::Rectilinear { fov_deg } = frame.projection;
+        let (projection, fov_deg) = match frame.projection {
+            Projection::Rectilinear { fov_deg } => (PROJECTION_RECTILINEAR, fov_deg),
+            Projection::Equirectangular => (PROJECTION_EQUIRECTANGULAR, 90.0),
+        };
         let mut flags = 0;
         if frame.effects.lensing {
             flags |= FLAG_LENSING;
@@ -60,7 +70,8 @@ impl GpuCamera {
             tan_half_fov: (0.5 * fov_deg.to_radians()).tan() as f32,
             flags,
             jitter: [jitter.0 as f32, jitter.1 as f32],
-            _pad: [0; 2],
+            projection,
+            _pad: 0,
         }
     }
 }
@@ -321,6 +332,7 @@ mod tests {
                 ("tan_half_fov", offset_of!(GpuCamera, tan_half_fov)),
                 ("flags", offset_of!(GpuCamera, flags)),
                 ("jitter", offset_of!(GpuCamera, jitter)),
+                ("projection", offset_of!(GpuCamera, projection)),
             ],
         );
         check(

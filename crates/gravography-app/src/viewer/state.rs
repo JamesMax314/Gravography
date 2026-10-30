@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use gravography_render::{Effects, Exposure, Scene, ToneMap};
+use gravography_render::{Effects, Exposure, Projection, Scene, ToneMap};
 
 /// Smallest and largest render scale (internal resolution / window resolution).
 pub const RENDER_SCALE_RANGE: (f32, f32) = (0.25, 1.0);
@@ -10,7 +10,7 @@ pub const RENDER_SCALE_RANGE: (f32, f32) = (0.25, 1.0);
 pub const MAX_SAMPLE_TARGET: u32 = 256;
 
 /// User-adjustable render settings (egui panel).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ViewSettings {
     /// Progressive sample target per pixel (accumulation stops there).
     pub samples: u32,
@@ -27,7 +27,14 @@ pub struct ViewSettings {
     pub exposure: Exposure,
     /// Pedagogical effect toggles (`docs/PRD.md` §6.4).
     pub effects: Effects,
+    /// Projection (FR-R2).
+    pub projection: Projection,
+    /// Observing band (`docs/PRD.md` §6.1).
+    pub band: gravography_render::scene::BandKind,
 }
+
+/// Field-of-view range of the rectilinear projection in the panel (`docs/PRD.md` FR-R2).
+pub const FOV_RANGE: (f64, f64) = (10.0, 150.0);
 
 /// Shortest interval between exposure/statistics meterings while the camera keeps moving. Since WP-12 a metering
 /// is a small GPU reduction read back asynchronously (`gravography_render::gpu::GpuStats`), so this only limits
@@ -47,6 +54,8 @@ impl ViewSettings {
             tone_map: scene.render.tone_map,
             exposure: scene.render.exposure,
             effects: scene.render.effects,
+            projection: scene.camera.projection,
+            band: scene.sky.band,
         }
     }
 
@@ -56,6 +65,8 @@ impl ViewSettings {
         self.samples != new.samples
             || self.render_scale.to_bits() != new.render_scale.to_bits()
             || self.effects != new.effects
+            || self.projection != new.projection
+            || self.band != new.band
     }
 }
 
@@ -283,6 +294,9 @@ mod tests {
         let mut e = s;
         e.effects.lensing = false;
         assert!(s.resets_accumulation(&e));
+        let mut p = s;
+        p.projection = Projection::Equirectangular;
+        assert!(s.resets_accumulation(&p));
     }
 
     #[test]

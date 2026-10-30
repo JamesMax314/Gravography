@@ -6,7 +6,8 @@ use gravography_render::ToneMap;
 use gravography_render::scene::{MAX_SPIN, ObserverSpec, PresetKind};
 
 use super::flight::{FlightSettings, Hud, PresetCheck, THRUST_RANGE, WARP_RANGE, preset_name};
-use super::state::{MAX_SAMPLE_TARGET, RENDER_SCALE_RANGE, ViewSettings};
+use super::state::{FOV_RANGE, MAX_SAMPLE_TARGET, RENDER_SCALE_RANGE, ViewSettings};
+use gravography_render::Projection;
 
 /// Read-only status shown in the panel and HUD.
 #[derive(Clone, Debug, Default)]
@@ -30,6 +31,8 @@ pub struct Status {
     pub mouse_captured: bool,
     /// GPU time of the last timed sample, milliseconds.
     pub gpu_ms: Option<f64>,
+    /// Shown under the heading, e.g. that a texture sky is approximate.
+    pub sky_note: Option<String>,
 }
 
 /// Editable copies of the flight controls.
@@ -56,6 +59,41 @@ pub struct Actions {
     pub step: bool,
     /// Reset the look rotation.
     pub reset_look: bool,
+    /// Save a bookmark under [`PersistPanel::name`].
+    pub save_bookmark: bool,
+    /// Load the bookmark with this index in [`PersistPanel::bookmarks`].
+    pub load_bookmark: Option<usize>,
+    /// Start recording a camera path.
+    pub start_recording: bool,
+    /// Stop recording and save the path under [`PersistPanel::name`].
+    pub stop_recording: bool,
+    /// Play the path with this index in [`PersistPanel::paths`].
+    pub play_path: Option<usize>,
+    /// Stop playback.
+    pub stop_playback: bool,
+    /// Re-read the bookmark and path directories.
+    pub refresh_files: bool,
+}
+
+/// Bookmarks and camera paths panel state.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PersistPanel {
+    /// Name for the next bookmark or path file.
+    pub name: String,
+    /// Bookmark files (names) in the bookmark directory.
+    pub bookmarks: Vec<String>,
+    /// Path files (names) in the path directory.
+    pub paths: Vec<String>,
+    /// Proper time between recorded samples, `M`.
+    pub interval: f64,
+    /// Playback rate, `M` of proper time per second.
+    pub speed: f64,
+    /// Loop playback.
+    pub looping: bool,
+    /// Samples recorded so far, while recording.
+    pub recording: Option<usize>,
+    /// Current and total samples, while playing.
+    pub playing: Option<(usize, usize)>,
 }
 
 /// Draws the left panel, editing `settings` and `flight` in place. `check` is the validity of `flight.editor`.
@@ -63,6 +101,7 @@ pub fn settings_panel(
     ui: &mut egui::Ui,
     settings: &mut ViewSettings,
     flight: &mut FlightPanel,
+    persist: &mut PersistPanel,
     check: &PresetCheck,
     status: &Status,
 ) -> Actions {
@@ -70,6 +109,9 @@ pub fn settings_panel(
     egui::ScrollArea::vertical().show(ui, |ui| {
         ui.heading("Gravography");
         ui.label(&status.gpu);
+        if let Some(note) = &status.sky_note {
+            ui.colored_label(ui.visuals().warn_fg_color, note);
+        }
         ui.separator();
         flight_section(ui, flight, &mut actions);
         ui.small(if status.mouse_captured {
@@ -86,12 +128,20 @@ pub fn settings_panel(
             );
             ui.small("Changing spin keeps the position and velocity; invalid states reset.");
         });
+        egui::ComboBox::from_label("band")
+            .selected_text(settings.band.label())
+            .show_ui(ui, |ui| {
+                for b in gravography_render::scene::BandKind::ALL {
+                    ui.selectable_value(&mut settings.band, b, b.label());
+                }
+            });
         ui.collapsing("Effects", |ui| {
             ui.checkbox(&mut settings.effects.lensing, "gravitational lensing");
             ui.checkbox(&mut settings.effects.frequency_shift, "frequency shift");
             ui.checkbox(&mut settings.effects.beaming, "intensity beaming");
         });
         render_section(ui, settings, &mut actions);
+        persist_section(ui, persist, &mut actions);
         ui.separator();
         ui.collapsing("Keys", |ui| {
             for line in [
@@ -196,6 +246,27 @@ fn preset_section(ui: &mut egui::Ui, spec: &mut ObserverSpec, check: &PresetChec
 
 fn render_section(ui: &mut egui::Ui, settings: &mut ViewSettings, actions: &mut Actions) {
     ui.collapsing("Render", |ui| {
+        let rectilinear = matches!(settings.projection, Projection::Rectilinear { .. });
+        egui::ComboBox::from_label("projection")
+            .selected_text(if rectilinear {
+                "rectilinear"
+            } else {
+                "equirectangular 360°"
+            })
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(rectilinear, "rectilinear").clicked() && !rectilinear {
+                    settings.projection = Projection::Rectilinear { fov_deg: 60.0 };
+                }
+                if ui
+                    .selectable_label(!rectilinear, "equirectangular 360°")
+                    .clicked()
+                {
+                    settings.projection = Projection::Equirectangular;
+                }
+            });
+        if let Projection::Rectilinear { fov_deg } = &mut settings.projection {
+            ui.add(egui::Slider::new(fov_deg, FOV_RANGE.0..=FOV_RANGE.1).text("vertical FOV (°)"));
+        }
         ui.add(
             egui::Slider::new(&mut settings.samples, 1..=MAX_SAMPLE_TARGET)
                 .text("samples")
@@ -234,6 +305,69 @@ fn render_section(ui: &mut egui::Ui, settings: &mut ViewSettings, actions: &mut 
             });
         if ui.button("Screenshot (P)").clicked() {
             actions.screenshot = true;
+        }
+    });
+}
+
+fn persist_section(ui: &mut egui::Ui, p: &mut PersistPanel, actions: &mut Actions) {
+    ui.collapsing("Bookmarks & camera paths", |ui| {
+        ui.horizontal(|ui| {
+            ui.label("name");
+            ui.text_edit_singleline(&mut p.name);
+        });
+        if ui.button("Save bookmark").clicked() {
+            actions.save_bookmark = true;
+        }
+        for (i, b) in p.bookmarks.iter().enumerate() {
+            if ui.button(format!("load {b}")).clicked() {
+                actions.load_bookmark = Some(i);
+            }
+        }
+        ui.separator();
+        ui.add(
+            egui::Slider::new(&mut p.interval, 0.05..=20.0)
+                .logarithmic(true)
+                .text("record every (M)"),
+        );
+        match p.recording {
+            Some(n) => {
+                ui.label(format!("recording: {n} samples"));
+                if ui.button("Stop & save path").clicked() {
+                    actions.stop_recording = true;
+                }
+            }
+            None => {
+                if ui
+                    .add_enabled(p.playing.is_none(), egui::Button::new("Record path"))
+                    .clicked()
+                {
+                    actions.start_recording = true;
+                }
+            }
+        }
+        ui.add(
+            egui::Slider::new(&mut p.speed, 0.01..=1000.0)
+                .logarithmic(true)
+                .text("playback (M/s)"),
+        );
+        ui.checkbox(&mut p.looping, "loop");
+        if let Some((k, n)) = p.playing {
+            ui.label(format!("playing sample {}/{n}", k + 1));
+            if ui.button("Stop playback").clicked() {
+                actions.stop_playback = true;
+            }
+        } else {
+            for (i, name) in p.paths.iter().enumerate() {
+                if ui
+                    .add_enabled(p.recording.is_none(), egui::Button::new(format!("play {name}")))
+                    .clicked()
+                {
+                    actions.play_path = Some(i);
+                }
+            }
+        }
+        if ui.small_button("refresh lists").clicked() {
+            actions.refresh_files = true;
         }
     });
 }

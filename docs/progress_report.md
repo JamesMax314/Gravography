@@ -6,50 +6,31 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
 
 ## Current state
 
-- WP-00 to WP-12 done.
-  - `gravography-physics`: Kerr–Schild metric and derivatives, Hamiltonian ray tracing (DOPRI5/RK4, termination,
-    escape direction, `g = 1/p_t`), BL ↔ KS, radii, invariants, observer dynamics, tetrad boosts (WP-06).
-  - `gravography-sky`: CIE 1931 table, Planck spectra, blackbody LUT, XYZ → sRGB, deterministic star catalogue,
-    diffuse band, flux-conserving mip-mapped `(w, w·T)` cube map, on-disk cache.
-  - `gravography-render` (WP-06): TOML scene files, `FrameParams`, CPU f64 reference renderer (rayon,
-    ray-differential footprints, cube-map shading, effect toggles), auto/manual exposure, ACES/Reinhard tone mapping,
-    PNG/EXR output. `ObserverSpec::{place, place_boosted}` (WP-11) build an observer from a preset spec.
-  - `gravography-render::gpu` (WP-07–09): headless/surface wgpu device, WGSL assembly, DOPRI5 per-pixel trace pass,
-    shading, accumulation, tone mapping, debug views, present pass (WP-10). WP-12 added:
-    - a fused vector-form RHS (9× faster);
-    - retuned GPU defaults and 1024² tiles;
-    - `GpuTimer` (GPU busy time) and `GpuStats` (log-average luminance and ray-status counts on the GPU, read back
-      asynchronously).
-  - `gravography-render::parity` (WP-07): GPU ↔ CPU parity harness.
-  - `gravography` binary: `gravography render --scene … --out …png|exr [--width --height --samples
-    --backend cpu|gpu --debug status|shift|steps --no-cache]`; `gravography bench` (WP-12: GPU time per sample at
-    several scales, static convergence, `--parity` for PRD test 15 with the same settings). With no subcommand,
-    `gravography` opens the **interactive viewer** (WP-10/11/12):
-    - free flight with WASD/RF thrust relative to the view, mouse-drag look, Space to cut thrust;
-    - presets (hover, ZAMO, circular orbit, radial infall) with validity checks;
-    - time warp, pause and single step;
-    - a HUD (FR-O4), a live spin slider and effect toggles;
-    - dynamic resolution while moving (≥ 960×540 pixels, 60 fps target);
-    - full-resolution progressive refinement when still;
-    - debounced resizes;
-    - P for screenshots, and `--smoke-test` for scripted checks (including a fall through the horizon and captures
-      of the composed window).
-- PRD §9 tests 1–16 pass, as do FR-X3 (scene round trip) and a renderer lensing validation.
-- **NF-1 met** on an Apple M2 Pro at 1080p (WP-12 entry):
-  - moving at scale 0.5: 70–190 fps on every example scene;
-  - still, full resolution, 16 samples: 0.3–0.9 s.
-- **Next work package:** WP-13 — v1 polish & release (bookmarks, camera paths, projection modes, false-colour
-  bands, texture sky, README, `THIRD_PARTY.md`).
+- **All work packages WP-00 to WP-13 are done.** v1 is feature-complete per `docs/PRD.md`:
+  - FR-R1–R6, FR-O1–O7 and FR-X1–X3 are satisfied;
+  - NF-1 is met (WP-12; 2560×1440 re-measured in WP-13);
+  - PRD §9 tests 1–16 pass.
+- **What exists** (details in the log entries):
+  - physics (Kerr–Schild geodesics, observers) in f64 on the CPU, the reference;
+  - the sky: blackbody star field, cube map, human vision plus false-colour bands, and an approximate texture sky;
+  - the CPU reference renderer and the GPU renderer (dynamic resolution, async statistics);
+  - the `gravography` binary: viewer, `render` and `bench`.
+  - The viewer's projections, bookmarks and camera paths are new in WP-13.
+- **Not done, optional or deferred** (needs the user's approval before tagging `v1.0.0`):
+  - **Schwarzschild fast path** (WP-12, optional): not implemented. NF-1 is met without it.
+  - **README screenshots:** WP-13 asks for screenshots in the README, but `CLAUDE.md` §3 forbids committing
+    screenshots. The README currently explains how to make them. **User decision needed.**
+- **Next:** with the user's approval, tag `v1.0.0` on `main`. v2 (`docs/PRD.md` §11) after that.
 - Toolchain: rustup, Rust **1.99.1** (`rust-toolchain.toml`).
 - The user approved shipping the CC BY-SA 4.0 CIE table (2026-10-30; see `THIRD_PARTY.md`).
-- The user confirmed (2026-10-30) that the WP-10 viewer window opens and resizes correctly, but that going full
-  screen was laggy. WP-12 addressed this: the renderer is about 24× faster, resizes are debounced, and the blocking
-  readbacks are gone. **User:** please check full screen again.
+- The user confirmed (2026-10-30) that the viewer opens and resizes. They reported full-screen lag (addressed in
+  WP-12) and "inverted" thrust, which is physical aberration. They chose (2026-10-30) **not** to add an
+  aberration-free mode.
 - Open questions for the user:
-  - The example scenes use auto exposure with −2 EV (−4 EV inside the horizon), chosen by eye. Adjust to taste.
-  - Please try the WP-11 manual checklist items marked **user** (keyboard focus, the feel of the controls) and the
-    captured mouse look (right-click, move the mouse, Esc). The agent can now capture the composed window in the
-    smoke test, but it still cannot drive real mouse or keyboard input.
+  - Approve tagging `v1.0.0` with the deferral above?
+  - README screenshots: commit a few curated images (for example under `docs/images/`, an explicit exception to
+    `CLAUDE.md` §3), or keep the README text-only?
+  - The example scenes use auto exposure with −2 EV (−4/−5 EV for some), chosen by eye. Adjust to taste.
 
 ---
 
@@ -70,7 +51,7 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
 | WP-10 | Viewer shell | done | `wp-10` |
 | WP-11 | Interactive flight | done | `wp-11` |
 | WP-12 | Performance | done | `wp-12` |
-| WP-13 | v1 polish & release | not started | |
+| WP-13 | v1 polish & release | done (awaiting `v1.0.0` approval) | `wp-13` |
 
 ---
 
@@ -105,6 +86,139 @@ Template for each entry (copy above the previous entry):
 **Notes for the next agent**
 -
 -->
+
+## WP-13 — v1 polish & release — 2026-10-30 — COMPLETE (tag `v1.0.0` pending user approval)
+
+**Summary**
+- **Projection modes (FR-R2):**
+  - `Projection::Equirectangular` (full sphere) on the CPU and GPU (a `projection` code in `GpuCamera`);
+  - viewer controls: projection selector and rectilinear FOV 10–150°;
+  - mouse sensitivity per projection (`Projection::degrees_per_pixel`);
+  - example `scenes/kerr_panorama.toml`.
+- **Bookmarks (FR-O6)** (`viewer/persist.rs`): RON files with the full state, so a view is reproduced bit for bit:
+  - observer event, tetrad, τ and motion (`Observer::from_state` validates them);
+  - look, preset, flight and view settings, spin and sky spec.
+  - Panel: name, save, load list. `--bookmark <file>` starts from one, using its sky.
+- **Camera paths (FR-O7):**
+  - `Recorder` stores samples at exact proper-time marks: `Flight::update_marked` splits the integration at each
+    mark;
+  - `Playback` replays at a chosen M/s, optionally looping;
+  - RON files in `paths/`.
+- **False-colour bands (§6.1):** near IR (J, H, K), near UV and soft X-ray (Chandra split) as three-window
+  composites (short → B, medium → G, long → R).
+  - A band now carries a display matrix and luminance weights. Each channel is normalised so that the band's
+    Wien-peak reference blackbody is neutral; human vision is unchanged bit for bit.
+  - The viewer switches bands live (only the LUT is re-uploaded). Scenes use `[sky] band = …`.
+  - Example `scenes/fast_observer_infrared.toml`.
+- **Texture sky (§6.5, approximate)** (`gravography-sky/src/texture.rs`):
+  - an equirectangular EXR/HDR image becomes the `(w, w·T)` cube by a per-pixel blackbody fit (nearest Planckian
+    locus point, luminance-matched);
+  - so the renderer's `w B(gT)` gives `g⁴` brightness scaling and the hue shift automatically;
+  - `[sky] texture = "…"`; the panel shows an "approximate" warning.
+- **Fixed a WP-12 flaw in the GPU timer.** `on_submitted_work_done` callbacks only fire in `poll`, so with one
+  poll per frame the measured "busy time" was the frame interval. The HUD showed "GPU 0.0 ms" when two completed
+  in one poll, and on a 60 Hz display the controller would always have scaled down. A helper thread now blocks on
+  each sample's submission index and timestamps the real completion:
+  - 1.8 / 15.3 ms at 320×180 / 1280×720, against 2.9 / 23.3 ms quantised before;
+  - the smoke-test fall converges toward the budget.
+- **Docs:**
+  - `README.md`: status, viewer options, panel sections, texture sky, band and projection in the scene schema,
+    new example scenes;
+  - `THIRD_PARTY.md`: the egui fonts (Ubuntu Font Licence, MIT / Bitstream Vera, OFL 1.1, MIT) and a summary of
+    the Rust dependency licences;
+  - `docs/physics.md`: equirectangular, false-colour bands and texture-sky sections.
+- **Smoke test:** additionally records the fall as a camera path (checks the 0.5 M grid), replays it, and
+  round-trips a bookmark (camera restored exactly). Its files stay under the screenshot directory.
+
+**Key files/modules**
+- `crates/gravography-render/src/camera.rs`: equirectangular projection; `shaders/camera.wgsl`; `gpu/tracer.rs`
+  `PROJECTION_*`.
+- `crates/gravography-app/src/viewer/persist.rs`: `Bookmark`, `CameraPath`, `Recorder`, `Playback`, RON I/O.
+- `crates/gravography-app/src/viewer/flight.rs`: `update_marked`, `restore`.
+- `crates/gravography-physics/src/observer.rs`: `Observer::from_state`.
+- `crates/gravography-sky/src/band.rs`: `Band::{near_infrared, near_ultraviolet, soft_xray, false_colour}`,
+  display matrix, luminance weights, `LN_S_FLOOR`.
+- `crates/gravography-render/src/scene.rs`: `BandKind`, `SkySpec::{band, texture}` (`SkySpec` is no longer `Copy`).
+- `crates/gravography-sky/src/texture.rs`, `crates/gravography-render/src/output.rs::load_equirect`.
+- `crates/gravography-render/src/gpu/timer.rs`: helper-thread timer.
+- `scenes/kerr_panorama.toml`, `scenes/fast_observer_infrared.toml`.
+
+**Decisions & deviations**
+- **"False-colour bands rendered with a colour map" (PRD §6.1)** is implemented as three-window composites mapped
+  to RGB, not a scalar colour map. A composite fits the existing three-channel LUT/shading pipeline with no new
+  pass, and it keeps the frequency shift visible as hue, which a single-channel map cannot. Bands, windows and
+  reference temperatures are listed in the README.
+- **The star field is band-independent.** The catalogue's visible flux defines each star's `(w, T)`, and the
+  bake always uses the human-vision table. Ordinary stars are therefore essentially invisible in soft X-rays
+  unless blueshifted by `g ≳ 50`, which is physically right and documented.
+- **Texture-sky approximation:** the hue moves along the Planckian locus only; off-locus colours collapse. It is
+  labelled "approximate" in the UI and README, as the PRD requires.
+- **Bookmarks use real state, not presets,** so arbitrary flight states are reproducible. They are rejected if
+  the tetrad is not orthonormal for the stored spin (corrupt or foreign files).
+- **New dependencies:** `serde` (derive) and `ron` in the app (PRD-suggested crates, for RON bookmarks and paths),
+  and the `image` crate's `hdr` feature (Radiance input for the texture sky).
+- **Changed tests:** `mouse_sensitivity_matches_pinhole_centre` moved into the render crate as part of
+  `equirectangular_covers_the_sphere` (sensitivity is now a `Projection` method). The view-settings reset test
+  covers projection and band. Several of my new tests had wrong expectations, which I corrected before
+  committing (marks at the frame boundary, lit-pixel count, X-ray "zero" vs 1e-35, Y vs Rec. 709 luminance).
+  No existing tolerance was loosened.
+
+**Tests**
+- `cargo test --workspace`: **254 passed, 3 ignored** (was 242). Ignored tests pass in release.
+- **New tests:**
+  - `equirectangular_covers_the_sphere` (4π to 1e-5, axis directions);
+  - `from_state_restores_exactly_and_validates`, `marked_updates_stop_exactly_on_the_marks`;
+  - `bookmarks_round_trip_bit_for_bit`, `recorded_paths_have_fixed_intervals_and_play_back`,
+    `file_stems_are_safe`;
+  - `false_colour_bands_are_neutral_at_reference_and_shift_with_temperature`,
+    `xray_lut_is_finite_where_stars_are_dark`;
+  - `blackbody_colours_are_recovered`, `orientation_and_uniform_images`;
+  - `exr_round_trip_and_refusals`, `uniform_texture_renders_as_blueshifted_blackbody` (g from PRD test 10,
+    within 6%).
+- **Test 16** now also covers both new scenes:
+  - `kerr_panorama`: flux within 0.2%; with the same footprint method the images match to 2e-5;
+  - `fast_observer_infrared`: flux within 0.8%; same footprint method 4e-6.
+
+**Visual checks**
+- **`kerr_panorama`:** the galactic band is a sinusoid across the map. The shadow is centred, ≈ 34° in radius,
+  flattened on the left and shifted right (Kerr).
+- **`fast_observer_infrared`:** the shadow is about 28° right of centre (prediction 16°–42°). The sky behind is
+  red/orange, ahead blue-white and saturated (beaming ≈ g⁴).
+- **Texture sky:** the Kerr panorama EXR used as the sky of a Schwarzschild scene is lensed into a new Einstein
+  ring and photon ring, with its colours preserved. Conversion: 2.3 s for a 1024² cube.
+- **Window capture:** the panel shows the band selector and the "Bookmarks & camera paths" section. The HUD shows
+  real GPU ms after the timer fix.
+
+**Performance**
+- **2560×1440 (WP-12 follow-up, GPU idle; ms per sample, scales 1 / 0.5 / 0.375):**
+
+  | Scene | 1.0 | 0.5 | 0.375 (= 960×540) | Still, 16 spp at 1440p |
+  |---|---|---|---|---|
+  | schwarzschild_far | 52.1 ms | 13.5 ms | 7.7 ms | 0.83 s |
+  | kerr_edge_on | 92.1 ms | 23.8 ms | 13.6 ms | 1.47 s |
+  | inside_horizon | 60.1 ms | 15.8 ms | 9.2 ms | 0.97 s |
+  | fast_observer | 32.9 ms | 8.8 ms | 5.1 ms | 0.53 s |
+
+  At the moving floor (960×540 pixels) every scene exceeds 60 fps (74–195).
+- The equirectangular and false-colour paths cost the same per ray: the panorama renders 960×480×4 spp in 0.7 s,
+  including startup.
+
+**Known issues / tech debt**
+- **Texture conversion speed:** brute-force nearest-locus search, about 2.3 s for a 1024² cube and an estimated
+  9 s at the default 2048². A precomputed 2D `(x, y) → T` table would make it O(1) per texel.
+- **No viewer control to load a texture:** texture skies are set in the scene file only.
+- **Bookmark sky mismatch:** a bookmark loaded under a different sky warns instead of re-baking. `--bookmark`
+  at startup uses the bookmark's sky.
+- **Per-frame allocations** (WP-12 note) remain.
+
+**Notes for the next agent**
+- `v1.0.0` waits for the user's approval of the deferrals and the screenshot question (see "Current state"). Do
+  not tag it without that.
+- **v2** (`docs/PRD.md` §11):
+  - accretion disk: add a surface-hit status to the tracer and an emitter record to the G-buffer (it has a free
+    `_pad` word);
+  - video: `CameraPath` plus the headless renderer;
+  - Kerr LUT acceleration.
 
 ## WP-12 — Performance — 2026-10-30 — COMPLETE
 

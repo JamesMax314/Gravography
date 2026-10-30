@@ -48,6 +48,15 @@ struct ViewArgs {
     /// Do not read or write the baked-sky cache.
     #[arg(long)]
     no_cache: bool,
+    /// Start from this bookmark (RON, saved from the viewer); its sky replaces the scene's.
+    #[arg(long)]
+    bookmark: Option<PathBuf>,
+    /// Directory for bookmarks.
+    #[arg(long, default_value = "bookmarks")]
+    bookmark_dir: PathBuf,
+    /// Directory for camera paths.
+    #[arg(long, default_value = "paths")]
+    path_dir: PathBuf,
 }
 
 #[derive(Subcommand)]
@@ -118,6 +127,19 @@ fn main() -> Result<()> {
 fn load_sky(scene: &Scene, no_cache: bool) -> Result<Sky> {
     let t0 = Instant::now();
     let lut = BlackbodyLut::human_vision();
+    if let Some(tex) = &scene.sky.texture {
+        // Texture sky (PRD §6.5, approximate): each pixel becomes a blackbody fitted to its chromaticity.
+        let img = gravography_render::output::load_equirect(Path::new(tex))?;
+        let cube = gravography_sky::cube_from_equirect(&img, scene.sky.face_size, &lut);
+        println!(
+            "sky: texture {tex} ({}×{}) → {}² cube in {:.2} s (approximate colours: blackbody fit per pixel)",
+            img.width,
+            img.height,
+            scene.sky.face_size,
+            t0.elapsed().as_secs_f64()
+        );
+        return Ok(Sky::new(cube, scene.sky.band.lut()));
+    }
     let cache = if no_cache { None } else { cache_dir() };
     let (cube, hit) = bake_sky_cached(&scene.sky_params()?, &lut, cache.as_deref())?;
     println!(
@@ -125,14 +147,23 @@ fn load_sky(scene: &Scene, no_cache: bool) -> Result<Sky> {
         if hit { "loaded from cache" } else { "baked" },
         t0.elapsed().as_secs_f64()
     );
-    Ok(Sky::new(cube, lut))
+    // The star field is defined in human vision (flux → solid angle); the band only changes the shading table.
+    Ok(Sky::new(cube, scene.sky.band.lut()))
 }
 
 fn view(args: &ViewArgs) -> Result<()> {
-    let scene = match &args.scene {
+    let mut scene = match &args.scene {
         Some(p) => Scene::load(p).with_context(|| format!("loading {}", p.display()))?,
         None => Scene::default(),
     };
+    let bookmark: Option<viewer::persist::Bookmark> = match &args.bookmark {
+        Some(p) => Some(viewer::persist::load_ron(p)?),
+        None => None,
+    };
+    if let Some(b) = &bookmark {
+        // Reproduce the bookmark's star field.
+        scene.sky = b.sky.clone();
+    }
     // Validate the camera before opening a window.
     scene.frame()?;
     let sky = load_sky(&scene, args.no_cache)?;
@@ -141,6 +172,18 @@ fn view(args: &ViewArgs) -> Result<()> {
         sky,
         screenshot_dir: args.screenshot_dir.clone(),
         smoke_test: args.smoke_test,
+        bookmark,
+        // The smoke test keeps its files next to its screenshots, out of the user's folders.
+        bookmark_dir: if args.smoke_test {
+            args.screenshot_dir.join("bookmarks")
+        } else {
+            args.bookmark_dir.clone()
+        },
+        path_dir: if args.smoke_test {
+            args.screenshot_dir.join("paths")
+        } else {
+            args.path_dir.clone()
+        },
     })
 }
 
