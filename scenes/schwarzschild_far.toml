@@ -1,0 +1,23 @@
+# Schwarzschild black hole seen by a static observer far away (r = 50 M), looking at the hole.
+# Expect: a black shadow of angular radius asin(3√3 · sqrt(1 − 2/50) / 50) ≈ 5.8°; a thin photon ring at its edge;
+# an Einstein ring of strongly magnified, tangentially sheared stars (the sky directly behind the hole) at ≈ 19°
+# (the weak-field estimate sqrt(4M/r) gives 16°); secondary images of the galactic band near the shadow; a uniform
+# blueshift g = (1 − 2/50)^(-1/2) ≈ 1.02 (barely visible).
+
+[spacetime]
+spin = 0.0
+
+[observer]
+preset = "hover"
+r = 50.0
+theta_deg = 90.0
+phi_deg = 0.0
+
+[camera]
+width = 960
+height = 540
+projection = { kind = "rectilinear", fov_deg = 40.0 }
+samples = 4
+
+[render]
+exposure = { auto = true, ev = -2.0 }

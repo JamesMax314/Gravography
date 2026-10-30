@@ -1,0 +1,25 @@
+# Inside the horizon of a Schwarzschild hole: free fall from rest at infinity, now at r = 1.2 M (horizon r = 2 M),
+# looking down toward the singularity with a wide field of view.
+# Expect: a black disc (the shadow) centred on the inward direction with angular radius ≈ 50.5°: the critical
+# photons (b = 3√3) reach this observer at sin ψ = b / (r E_obs) with E_obs = (1 − sqrt(1 − 27 f / r²) sqrt(2/r)) / f,
+# f = 1 − 2/r (E = 1 photons, Schwarzschild coordinates). All other light comes from outside through the horizon.
+# The whole sky is blueshifted (g ≈ 1.5–2 at the edges of the view) and most strongly near the shadow edge
+# (g ≈ 5.6), which glows blue-white.
+
+[spacetime]
+spin = 0.0
+
+[observer]
+preset = "radial_infall"
+r = 1.2
+theta_deg = 90.0
+phi_deg = 0.0
+
+[camera]
+width = 960
+height = 540
+projection = { kind = "rectilinear", fov_deg = 120.0 }
+samples = 4
+
+[render]
+exposure = { auto = true, ev = -4.0 }

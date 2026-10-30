@@ -1,0 +1,21 @@
+# Near-extremal Kerr hole (a = 0.99) seen edge-on from a static observer at r = 20 M in the equatorial plane.
+# Expect: a shadow that is flattened on the left (the side whose rotation moves toward the camera, where prograde
+# photon orbits sit closest to the hole) and displaced to the right; asymmetric lensing of the star field.
+
+[spacetime]
+spin = 0.99
+
+[observer]
+preset = "hover"
+r = 20.0
+theta_deg = 90.0
+phi_deg = 0.0
+
+[camera]
+width = 960
+height = 540
+projection = { kind = "rectilinear", fov_deg = 45.0 }
+samples = 4
+
+[render]
+exposure = { auto = true, ev = -2.0 }

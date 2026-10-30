@@ -6,21 +6,23 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
 
 ## Current state
 
-- WP-00 to WP-05 done.
+- WP-00 to WP-06 done.
   - `gravography-physics`: Kerr–Schild metric and derivatives, Hamiltonian ray tracing (DOPRI5/RK4, termination,
-    escape direction, `g = 1/p_t`), BL ↔ KS, radii, invariants, and observer dynamics (thrust, Fermi–Walker
-    transport, presets, limits, spin change).
-  - `gravography-sky` (WP-05): bundled CIE 1931 2° table, Planck spectra, band abstraction, blackbody LUT
-    (`[ln S, x, y]`, 4096 entries, 100 K–10⁷ K), XYZ → sRGB, deterministic star catalogue (SplitMix64), diffuse
-    galactic band, cube map `(w, w·T)` with exact texel solid angles and a flux-conserving mip chain, CPU
-    trilinear sampling, and an on-disk cache.
-- PRD §9 tests 1–14 pass. No renderer yet.
-- Property tests now use a fixed seed (`.cargo/config.toml`), so `cargo test` is deterministic.
-- **Next work package:** WP-06 — CPU reference renderer + headless CLI.
+    escape direction, `g = 1/p_t`), BL ↔ KS, radii, invariants, observer dynamics, tetrad boosts (WP-06).
+  - `gravography-sky`: CIE 1931 table, Planck spectra, blackbody LUT, XYZ → sRGB, deterministic star catalogue,
+    diffuse band, flux-conserving mip-mapped `(w, w·T)` cube map, on-disk cache.
+  - `gravography-render` (WP-06): TOML scene files, `FrameParams`, CPU f64 reference renderer (rayon,
+    ray-differential footprints, cube-map shading, effect toggles), auto/manual exposure, ACES/Reinhard tone mapping,
+    PNG/EXR output.
+  - `gravography` binary: `gravography render --scene … --out …png|exr [--width --height --samples --backend
+    --no-cache]`. Only the CPU backend exists; the interactive viewer is not built yet.
+- PRD §9 tests 1–14 pass, as do FR-X3 (scene round trip) and a renderer lensing validation against the exact
+  Schwarzschild lens map.
+- **Next work package:** WP-07 — GPU foundation.
 - Toolchain: rustup, Rust **1.99.1** (`rust-toolchain.toml`).
-- Open questions for the user: the CIE table is CC BY-SA 4.0 (the CIE's licence for its open dataset). It is
-  redistributable with attribution (PRD PL-6), but please confirm you are happy shipping share-alike data alongside
-  MIT/Apache code (see `THIRD_PARTY.md`).
+- Open questions for the user:
+  - The CIE table is CC BY-SA 4.0. Please confirm you are happy shipping it (see `THIRD_PARTY.md`).
+  - The example scenes use auto exposure with −2 EV (−4 EV inside the horizon), chosen by eye. Adjust to taste.
 
 ---
 
@@ -34,7 +36,7 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
 | WP-03 | CPU ray tracing | done | `wp-03` |
 | WP-04 | Observer | done | `wp-04` |
 | WP-05 | Colour & sky | done | `wp-05` |
-| WP-06 | CPU reference renderer + headless CLI | not started | |
+| WP-06 | CPU reference renderer + headless CLI | done | `wp-06` |
 | WP-07 | GPU foundation | not started | |
 | WP-08 | GPU ray tracer | not started | |
 | WP-09 | GPU shading & headless GPU render | not started | |
@@ -76,6 +78,139 @@ Template for each entry (copy above the previous entry):
 **Notes for the next agent**
 -
 -->
+
+## WP-06 — CPU reference renderer + headless CLI — 2026-10-30 — COMPLETE
+
+**Summary**
+- `gravography-render`:
+  - scene files (`Scene`, TOML via serde, `deny_unknown_fields`, every field defaulted except `[observer]`);
+  - the backend-agnostic `FrameParams` (Kerr, camera event, tetrad with boost and look rotation, size,
+    projection, samples, effects, exposure, tone map);
+  - the f64 CPU reference renderer (`CpuRenderer`: rayon over rows, R2 jittered samples, ray-differential
+    footprints, cube-map shading `w · XYZ(g T)`, §6.4 effect toggles);
+  - auto/manual exposure, ACES-fitted and extended-Reinhard tone mapping, PNG (8-bit sRGB) and EXR (linear) output.
+- `gravography-physics`: `Tetrad::boosted` (pure Lorentz boost in tetrad components), used for the fast-moving
+  observer scene.
+- `gravography` binary: `render` subcommand (clap). The sky is cached in `~/Library/Caches/gravography`.
+  `--backend gpu` exits with a clear error until WP-09.
+- Example scenes: `scenes/schwarzschild_far.toml`, `kerr_edge_on.toml` (a = 0.99), `inside_horizon.toml`,
+  `fast_observer.toml`.
+- README: CLI and full scene-schema documentation. `docs/physics.md` § "Rendering" covers projection, boosts,
+  shading, ray differentials, exposure and tone mapping, and determinism.
+
+**Key files/modules**
+- `crates/gravography-render/src/scene.rs`: scene schema, validation, `Scene::{frame, sky_params, cpu_settings}`.
+- `crates/gravography-render/src/frame.rs`: `FrameParams`, `Effects`.
+- `crates/gravography-render/src/camera.rs`: `Projection::Rectilinear` (direction, pixel solid angle).
+- `crates/gravography-render/src/cpu.rs`: `CpuRenderer` (`cast`, `cast_pixel`, `footprint`, `render`),
+  `RenderStats`, `sample_offset`.
+- `crates/gravography-render/src/sky.rs`: `Sky` (cube + LUT), texel solid angle, LOD, `shade`.
+- `crates/gravography-render/src/tonemap.rs`: `Exposure`, `ToneMap`, ACES fitted, Reinhard, sRGB8.
+- `crates/gravography-render/src/output.rs`: `HdrImage`, `write_image` (PNG/EXR by extension).
+- `crates/gravography-render/src/lib.rs`: `display_scale` (exposure for an image).
+- `crates/gravography-render/tests/scene_files.rs`: FR-X3 round trip, scenes parse/build/render, README coverage.
+- `crates/gravography-render/tests/render_validation.rs`: footprint and escape direction vs the exact lens map.
+- `crates/gravography-app/src/main.rs`: CLI.
+
+**Decisions & deviations**
+- **Footprint:** forward-difference ray differentials, 2 extra rays per sample, `ε = 0.25` px, retry at `−ε`, then
+  isotropic or unlensed fallbacks (counted in the stats). The footprint is isotropic and preserves area
+  (`lod = ½ log₂(Ω/Ω_texel(d))`). Anisotropic filtering is not attempted (documented in `physics.md`). With N
+  samples, each sample uses 1/N of the pixel's footprint. WP-09 should use the same LOD formula with
+  `textureSampleLevel`, not hardware `textureGrad` LOD, to match.
+- **Lensing-off toggle:** escape direction = unit spatial part of `k = −e_(0) + nⁱ e_(i)` (aberration kept).
+- **Error status:** PRD §5.6 asks for magenta in debug builds. The CPU renderer draws `Error` (and every
+  non-escaped status) black in all builds and counts them in `RenderStats`, so debug and release images stay
+  identical. The FR-R6 status debug view (WP-09) is where errors should be shown. No errors occurred in any scene.
+- **Projection:** only rectilinear (vertical FOV) is implemented. `Projection` is a tagged enum, so WP-13 can add
+  equirectangular (FR-R2) without a schema change.
+- **Exposure:** auto = log-average luminance of the lit pixels (Y > 0) → 0.18, plus EV compensation. Manual is
+  relative to a 5772 K blackbody with w = 1. EXR stores the exposed but not tone-mapped linear sRGB.
+- **Scene observer:** a preset plus an optional `boost` (velocity relative to the preset, in its frame) and a
+  `look` rotation (yaw, then pitch, then roll). Scenes do not advance the observer in time. Bookmarks (FR-O6,
+  RON) are separate and come later.
+- **CLI overrides:** `--width/--height/--samples` override the scene.
+- New dependencies:
+  - `serde` and `toml`: scene files (FR-X2/X3);
+  - `image` (only the `png` and `exr` features): output;
+  - `rayon`: parallel renderer;
+  - `thiserror`: errors;
+  - `clap` and `anyhow` (app): CLI;
+  - `approx` (dev).
+- PRD unchanged.
+
+**Tests**
+- `cargo test --workspace`: 177 passed, 1 ignored (the sky production bake, unchanged from WP-05 and not touched).
+  New in this WP: 20 render unit tests, 5 render integration tests, 2 physics tests.
+- **FR-X3:**
+  - a scene with every field non-default round-trips through TOML;
+  - every `scenes/*.toml` parses, round-trips, builds a frame and renders at thumbnail size with no
+    errors/max-steps/singular rays;
+  - every serialised key appears in backticks in README (this caught two undocumented keys during the WP).
+- **Lensing validation:** static camera at d = 10⁴ in Schwarzschild against exact orbit quadrature:
+  - escape direction error 7e-12 rad (tolerance 1e-8);
+  - footprint / pixel solid angle vs the exact inverse magnification `(sin ψ/sin θ)|dψ/dθ|`: ≤ 6.8e-4 relative
+    (tolerance 1e-3) at θ/θ_E ∈ {0.7, 0.9, 1.2, 1.5, 2.5}, including the parity-flipped secondary images.
+- **Other unit tests:**
+  - lensing-off footprint equals the analytic pinhole `Δ² cos³θ` (1e-3);
+  - the pixel solid angles sum to the frustum (1e-5);
+  - a uniform sky stays uniform with `g = (1 − 2/r)^{-1/2}` around a Schwarzschild shadow (1e-5);
+  - the render is bit-identical across runs (NF-3);
+  - effect toggles: g⁴ and LUT clamp;
+  - LOD level selection;
+  - ACES endpoints, grey neutrality and mid-grey value 0.105591; Reinhard white point and hue;
+  - auto exposure; sRGB8 encoding; PNG/EXR round trip;
+  - scene validation; look-rotation conventions; boost and look application;
+  - boost Doppler `sqrt((1+β)/(1−β))` and orthonormality (proptest).
+
+**Visual checks** (960×540, 4 spp, default sky; PNGs in `target/screenshots/`, not committed)
+- `schwarzschild_far` (r = 50, 40° FOV):
+  - shadow radius 78 px = 5.8° (predicted asin(3√3·sqrt(1 − 2/50)/50) = 5.8°), with a thin photon ring;
+  - an Einstein ring of tangentially stretched stars at ≈ 18.5° (weak-field estimate 16°);
+  - two secondary images of the galactic band hugging the shadow diagonally.
+- `kerr_edge_on` (a = 0.99, r = 20, 45° FOV): D-shaped shadow, flattened on the left (the approaching side, where
+  prograde photon orbits lie closest in) and displaced to the right; nested photon-ring arcs on the flat side;
+  asymmetric lensing of the band.
+- `inside_horizon` (radial infall, r = 1.2, 120° FOV):
+  - black disc around the inward direction with radius 50.3° measured, against 50.5° predicted from the critical
+    impact parameter for an E = 1 infaller (formula in the scene file);
+  - a blue-white glowing rim, g = 5.5 probed just outside the edge (5.6 predicted);
+  - the whole sky blueshifted (g ≈ 1.5–2 at the image edges, probed); all stars white.
+- `fast_observer` (hover position at r = 10, boost 0.9 c tangential, looking along the motion, 90° FOV):
+  - shadow spans 15.7°–41.6° right of centre, against 15.8°–41.6° predicted by aberrating the static-frame edges
+    90° ± 27.7°;
+  - g = 4.873 at the image centre, against γ(1+β)/sqrt(1−2/r) = 4.87;
+  - the forward sky is a blue-white blaze; the corners are slightly reddened (g = 0.81 probed).
+- I probed the g values with a throwaway example (not committed). The FR-R6 `g` debug view arrives in WP-09.
+
+**Performance** (M-series Mac, release, rayon on all cores, rtol 1e-10, 960×540 × 4 spp = 2.07 M primary samples
+plus 2 differential rays each):
+- schwarzschild_far 43 s; kerr_edge_on 75 s; inside_horizon 53–64 s; fast_observer 35 s;
+- mean 95–253 steps per ray, max 3876 (Kerr, near-critical);
+- sky bake 1.8 s cold, 0.1 s from cache (268 MB file).
+
+**Known issues / tech debt**
+- **Auto exposure depends on resolution** for sparse star fields: at low resolution each pixel averages more sky,
+  so the log-average rises. At 240×135 the scale was 20× lower than at 960×540 for `inside_horizon`. This is
+  inherent to log-average metering of point sources. If it bothers users, consider a percentile or mean-luminance
+  meter (WP-12/13); GPU parity (WP-09) should compare at equal resolution, or with manual exposure.
+- **Star field is busy:** the default 2·10⁵ stars with α = 1.5 give a dense, mostly orange field. The scene files
+  compensate with −2 EV. Sky defaults could be revisited in WP-13.
+- **Texel-wide arcs:** near the Einstein ring and photon rings, stars are drawn as texel-width arcs (inherent to
+  the 2048² cube map; documented). With 1 spp, a faint concentric moiré appears there; 4 spp mostly removes it.
+- **No progress output:** the CPU renderer prints nothing during a long render.
+
+**Notes for the next agent**
+- **Matching the reference:** the GPU must reproduce `CpuRenderer::cast`, `CpuRenderer::footprint`, `Sky::shade`,
+  `Sky::lod` and `tonemap::*` for parity (WP-08/09). Their structure is deliberately simple: port them by name.
+  `RenderStats::status` uses the index order of `cpu::status_index`.
+- **Camera setup:** `Scene::frame()` builds everything a backend needs. The tetrad already includes the boost and
+  look rotation, and `FrameParams::validate` checks sizes.
+- **Probing pixels:** `CpuRenderer::cast_pixel(x, y)` gives status, escape direction, g and steps. It is handy for
+  parity harnesses and debugging.
+- **Sky cache:** the cache file is keyed by `SkyParams`; tests use `bake_sky` directly (no cache).
+- **Renders take time:** a full-size reference render takes ~1 min. For quick looks use
+  `--width 480 --height 270 --samples 1` (~3–5 s).
 
 ## WP-05 — Colour & sky — 2026-10-30 — COMPLETE
 

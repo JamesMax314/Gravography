@@ -1,0 +1,26 @@
+# Fast-moving observer: a static observer's position at r = 10 M around a Schwarzschild hole, but moving
+# tangentially at β = 0.9 (γ ≈ 2.29), looking along the direction of motion.
+# Expect: relativistic aberration, cos θ' = (cos θ + β)/(1 + β cos θ), pulls the shadow (centred 90° to the right in
+# the static frame, angular radius asin(3√3 sqrt(1 − 2/r)/r) ≈ 27.7°) forward: its edges appear ≈ 16° and ≈ 42°
+# right of centre. The sky ahead is blueshifted (g up to γ(1 + β)/sqrt(1 − 2/r) ≈ 4.9: stars turn blue-white and
+# bright); the sky behind the observer is dimmed and reddened.
+
+[spacetime]
+spin = 0.0
+
+[observer]
+preset = "hover"
+r = 10.0
+theta_deg = 90.0
+phi_deg = 0.0
+boost = [0.0, 0.9, 0.0]
+look = { yaw_deg = 90.0 }
+
+[camera]
+width = 960
+height = 540
+projection = { kind = "rectilinear", fov_deg = 90.0 }
+samples = 4
+
+[render]
+exposure = { auto = true, ev = -2.0 }
