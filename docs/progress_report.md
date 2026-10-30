@@ -11,11 +11,9 @@ Hand-off log between agent sessions. Format and rules: `CLAUDE.md` §7. Newest l
   transforms for positions, vectors and covectors, and the characteristic radii. Frame-dragging sign confirmed.
   No derivatives, geodesics, sky or rendering yet.
 - **Next work package:** WP-02 — Derivatives, Hamiltonian, invariants.
-- Open questions for the user:
-  - The local `cargo fmt` resolves to a stale crates.io `rustfmt`/`cargo-fmt` in `~/.cargo/bin`, which shadows
-    Homebrew's working one. Agents should run checks with `PATH=/opt/homebrew/bin:$PATH` (see the WP-00 notes).
-    You may want to delete `~/.cargo/bin/rustfmt` and `~/.cargo/bin/cargo-fmt`.
-  - Toolchain is pinned to the installed Homebrew Rust 1.87.0 (see the WP-00 decisions). Bump it if you install rustup.
+- Toolchain: rustup, pinned to stable **1.99.1** (`rust-toolchain.toml`). Plain `cargo fmt/clippy/test`
+  work; the old `PATH=/opt/homebrew/bin` workaround is obsolete (Homebrew Rust is uninstalled).
+- Open questions for the user: none.
 
 ---
 
@@ -71,6 +69,37 @@ Template for each entry (copy above the previous entry):
 **Notes for the next agent**
 -
 -->
+
+## Maintenance — Toolchain update to Rust 1.99.1 — 2026-10-30 — COMPLETE
+
+**Summary**
+- The user replaced Homebrew Rust 1.87.0 with rustup and deleted the stale `~/.cargo/bin/{rustfmt,cargo-fmt}`.
+- `rust-toolchain.toml` now pins `1.99.1` (latest stable on this date, PRD PL-1 now satisfied);
+  `rust-version = "1.99"` in the workspace; README updated.
+- `cargo update` refreshed the lockfile; the `proptest` requirement was raised to 1.12.0. All direct dependencies are on
+  their latest stable releases (`approx` 0.6 is only a release candidate, so it stays on 0.5).
+
+**Key files/modules**
+- `rust-toolchain.toml`, `Cargo.toml`, `Cargo.lock`, `crates/gravography-physics/Cargo.toml`, `README.md`.
+
+**Decisions & deviations**
+- This supersedes the WP-00 deviation (pin to 1.87.0) and the `PATH=/opt/homebrew/bin` workaround in the
+  WP-00/WP-01 notes.
+
+**Tests**
+- 37 passed, 0 ignored on 1.99.1; fmt (rustfmt 1.10.0) and clippy clean with no code changes needed.
+
+**Visual checks**
+- n/a
+
+**Performance**
+- n/a
+
+**Known issues / tech debt**
+- None.
+
+**Notes for the next agent**
+- Just use `cargo` directly. rustup auto-installs the pinned toolchain if missing.
 
 ## WP-01 — Metric core — 2026-10-30 — COMPLETE
 
@@ -144,7 +173,7 @@ Template for each entry (copy above the previous entry):
 - `p_θ` for Carter `Q`: `ks_to_bl_covector` already gives `p_BL = Jᵀ p_KS`, and `p_θ` is its index 2 (PRD §5.3).
   That is a cheap cross-check for any closed-form Jacobian you derive.
 - Use `Kerr::bl_g_lo` and `bl_to_ks_*` to build test initial conditions from BL formulas.
-- Run checks with `export PATH=/opt/homebrew/bin:$PATH` (stale `cargo-fmt` otherwise).
+- ~~Run checks with `export PATH=/opt/homebrew/bin:$PATH`~~: obsolete, see the toolchain entry above.
 
 ## WP-00 — Repository bootstrap — 2026-10-30 — COMPLETE
 
